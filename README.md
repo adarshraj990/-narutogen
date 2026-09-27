@@ -10,15 +10,22 @@
 2. Select **Change runtime type**.
 3. Choose **T4 GPU** and click **Save**.
 
-### Step 2: Install Dependencies (Run in first Colab cell)
+### Step 2: Clone Repository (Run in first cell)
+```bash
+!rm -rf narutogen -narutogen
+!git clone https://github.com/adarshraj990/-narutogen.git narutogen
+%cd narutogen
+```
+
+### Step 3: Install Dependencies
 ```bash
 !pip install -q gradio transformers torchdiffeq x-transformers vocos soundfile librosa pysrt pydub psutil
 !apt-get install -y ffmpeg
 ```
 
-### Step 3: Launch the Gradio Web Interface (Recommended)
+### Step 4: Launch the Gradio Web Interface
 ```bash
-!python app.py
+!python dubbing_pipeline.py
 ```
 *Gradio will output a public URL (`https://XXXXX.gradio.live`) so you can access the sleek UI directly from your browser!*
 
