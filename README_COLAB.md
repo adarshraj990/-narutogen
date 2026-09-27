@@ -12,11 +12,17 @@
 
 ### Step 2: Install Dependencies (Run in first Colab cell)
 ```bash
-!pip install -q transformers torchdiffeq x-transformers vocos soundfile librosa pysrt pydub psutil
+!pip install -q gradio transformers torchdiffeq x-transformers vocos soundfile librosa pysrt pydub psutil
 !apt-get install -y ffmpeg
 ```
 
-### Step 3: Run the Pipeline (Run in second Colab cell)
+### Step 3: Launch the Gradio Web Interface (Recommended)
+```bash
+!python app.py
+```
+*Gradio will output a public URL (`https://XXXXX.gradio.live`) so you can access the sleek UI directly from your browser!*
+
+### Or Run via Command-Line Interface (CLI):
 ```bash
 !python dubbing_pipeline.py --srt sample_hindi_english.srt
 ```

@@ -708,6 +708,7 @@ def run_pipeline(
     print(f"📊 Requested Duration:   {target_dur_sec:.2f}s ({target_dur_sec/60:.2f} mins)")
     print(f"📊 Sample Rate: {final_info.samplerate} Hz | Channels: {final_info.channels}")
     print("=" * 65 + "\n")
+    return str(output_wav_path)
 
 
 # ==================================================================================================
