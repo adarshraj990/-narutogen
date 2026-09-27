@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.wav
+*.mp3
+intermediate_parts/
+concat_list.txt
+.ipynb_checkpoints/
+.env
+.venv/
+env/
+venv/
