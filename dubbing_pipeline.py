@@ -118,8 +118,9 @@ except Exception:
     pass
 
 # Try importing RVC (rvc_python.infer exports RVCInference; infer_file is a method of the class)
+RVCInference: Any = None
 try:
-    from rvc_python.infer import RVCInference
+    from rvc_python.infer import RVCInference  # type: ignore
     RVC_AVAILABLE = True
 except Exception as _rvc_err:
     RVCInference = None
@@ -427,31 +428,31 @@ class CharacterVoiceConverter:
                     sys.executable, "-m", "pip", "install", "-q", "--no-deps", "rvc-python"
                 ])
                 _patch_tensorboard_for_fairseq()
-                from rvc_python.infer import RVCInference
+                from rvc_python.infer import RVCInference as _RVCClass  # type: ignore
+                RVCInference = _RVCClass
                 RVC_AVAILABLE = True
                 print("✅ [RVC AUTO-INSTALL] RVC inference engine installed successfully!")
             except Exception as e:
                 print(f"⚠️ [RVC NOTICE] 'rvc-python' not installed ({e}). Falling back to base TTS.")
-                return
-
-        if RVCInference is None:
-            try:
-                _patch_tensorboard_for_fairseq()
-                from rvc_python.infer import RVCInference
-                RVC_AVAILABLE = True
-            except Exception as e:
-                print(f"⚠️ [RVC LOAD ERROR] Cannot import RVCInference: {e}. Falling back to baseline TTS.")
                 self.engine = None
                 return
 
+        if RVCInference is None or not callable(RVCInference):
+            print("⚠️ [RVC LOAD ERROR] RVCInference is unavailable. Falling back to baseline TTS.")
+            self.engine = None
+            return
+
         try:
             device = "cuda:0"
-            import torch
-            if not torch.cuda.is_available():
+            try:
+                import torch  # type: ignore
+                if not torch.cuda.is_available():
+                    device = "cpu"
+                    print("⚠️ [RVC NOTICE] CUDA unavailable, running RVC on CPU.")
+            except Exception:
                 device = "cpu"
-                print("⚠️ [RVC NOTICE] CUDA unavailable, running RVC on CPU.")
 
-            self.engine = RVCInference(device=device)
+            self.engine = RVCInference(device=device)  # type: ignore
             self.engine.load_model(self.model_path, index_path=self.index_path or "", version="v2")
             if hasattr(self.engine, "set_params"):
                 self.engine.set_params(
