@@ -52,12 +52,22 @@ except ImportError:
     pysrt = None
     PYSRT_AVAILABLE = False
 
-# Try importing Edge-TTS
+# Try importing Edge-TTS with graceful auto-install
 try:
     import edge_tts
     EDGE_TTS_AVAILABLE = True
 except ImportError:
-    EDGE_TTS_AVAILABLE = False
+    try:
+        import subprocess
+        print("⚡ [AUTO-INSTALL] 'edge-tts' not found in environment. Installing now...")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "edge-tts>=6.1.10"])
+        import edge_tts
+        EDGE_TTS_AVAILABLE = True
+        print("✅ [AUTO-INSTALL] 'edge-tts' installed successfully!")
+    except Exception as e:
+        print(f"⚠️ [AUTO-INSTALL NOTICE] Could not install edge-tts: {e}")
+        edge_tts = None
+        EDGE_TTS_AVAILABLE = False
 
 # Try importing RVC
 try:
@@ -230,6 +240,11 @@ async def _async_generate_single_cue(
 ) -> bool:
     """Generates a single dialogue audio file via Edge-TTS under concurrency control."""
     async with semaphore:
+        if edge_tts is None:
+            print(f"⚠️ [TTS ERROR] 'edge-tts' not imported.")
+            silence = AudioSegment.silent(duration=cue.target_dur_ms, frame_rate=SAMPLE_RATE)
+            silence.export(output_path, format="wav")
+            return False
         try:
             communicate = edge_tts.Communicate(cue.text, voice, rate=rate)
             await communicate.save(output_path)
@@ -253,6 +268,18 @@ async def batch_generate_tts(
     Executes concurrent Edge-TTS synthesis for all subtitles.
     Generates 1,000+ subtitles in under 60-90 seconds.
     """
+    global edge_tts, EDGE_TTS_AVAILABLE
+    if not EDGE_TTS_AVAILABLE or edge_tts is None:
+        try:
+            import subprocess
+            print("⚡ [TTS SETUP] 'edge-tts' missing. Auto-installing now...")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "edge-tts>=6.1.10"])
+            import edge_tts
+            EDGE_TTS_AVAILABLE = True
+            print("✅ [TTS SETUP] 'edge-tts' ready!")
+        except Exception as e:
+            raise RuntimeError(f"Edge-TTS is required for synthesis: {e}. Run '!pip install edge-tts'.")
+
     print(f"\n⚡ [STEP 1: TTS] Starting async synthesis for {len(cues)} cues using voice '{voice}'...")
     semaphore = asyncio.Semaphore(concurrency)
     tts_output_dir.mkdir(parents=True, exist_ok=True)
@@ -338,8 +365,24 @@ class CharacterVoiceConverter:
         """Initializes the RVC engine."""
         print(f"\n🎙️ [STEP 2: RVC] Initializing RVC Engine with model: {Path(self.model_path).name}...")
         if not RVC_AVAILABLE:
-            print("⚠️ [RVC WARNING] 'rvc-python' package not installed. Falling back to base TTS.")
-            return
+            try:
+                import subprocess
+                print("⚡ [RVC AUTO-INSTALL] 'rvc-python' not detected. Installing pre-built wheels...")
+                subprocess.check_call([
+                    sys.executable, "-m", "pip", "install", "-q",
+                    "fairseq-fixed", "pyworld-fixed", "torchcrepe", "faiss-cpu"
+                ])
+                subprocess.check_call([
+                    sys.executable, "-m", "pip", "install", "-q", "--no-deps", "rvc-python"
+                ])
+                from rvc_python.infer import RVCInference, infer_file
+                globals()["RVC_AVAILABLE"] = True
+                globals()["RVCInference"] = RVCInference
+                globals()["infer_file"] = infer_file
+                print("✅ [RVC AUTO-INSTALL] RVC inference engine installed successfully!")
+            except Exception as e:
+                print(f"⚠️ [RVC NOTICE] 'rvc-python' not installed ({e}). Falling back to base TTS.")
+                return
 
         try:
             device = "cuda:0"
