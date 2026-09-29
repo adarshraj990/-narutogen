@@ -66,20 +66,27 @@ def _patch_tensorboard_for_fairseq():
 
 _patch_tensorboard_for_fairseq()
 
-# Try importing RVC Inference libraries
-try:
-    from rvc_python.infer import RVCInference, infer_file
-    RVC_AVAILABLE = True
-except Exception as _rvc_err:
-    RVCInference = None
-    infer_file = None
-    RVC_AVAILABLE = False
-
 try:
     import torch
     TORCH_AVAILABLE = True
+    # In PyTorch 2.6+, torch.load defaults to weights_only=True which breaks RVC checkpoints
+    _orig_torch_load = torch.load
+    def _patched_torch_load(*args, **kwargs):
+        if "weights_only" not in kwargs:
+            kwargs["weights_only"] = False
+        return _orig_torch_load(*args, **kwargs)
+    torch.load = _patched_torch_load
 except ImportError:
+    torch = None
     TORCH_AVAILABLE = False
+
+# Try importing RVC Inference libraries (rvc_python.infer exports RVCInference)
+try:
+    from rvc_python.infer import RVCInference
+    RVC_AVAILABLE = True
+except Exception as _rvc_err:
+    RVCInference = None
+    RVC_AVAILABLE = False
 
 
 def find_default_naruto_model() -> Tuple[Optional[str], Optional[str]]:

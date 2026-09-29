@@ -105,13 +105,24 @@ def _patch_tensorboard_for_fairseq():
 
 _patch_tensorboard_for_fairseq()
 
-# Try importing RVC
+# In PyTorch 2.6+, torch.load defaults to weights_only=True which breaks RVC checkpoints
 try:
-    from rvc_python.infer import RVCInference, infer_file
+    import torch
+    _orig_torch_load = torch.load
+    def _patched_torch_load(*args, **kwargs):
+        if "weights_only" not in kwargs:
+            kwargs["weights_only"] = False
+        return _orig_torch_load(*args, **kwargs)
+    torch.load = _patched_torch_load
+except Exception:
+    pass
+
+# Try importing RVC (rvc_python.infer exports RVCInference; infer_file is a method of the class)
+try:
+    from rvc_python.infer import RVCInference
     RVC_AVAILABLE = True
 except Exception as _rvc_err:
     RVCInference = None
-    infer_file = None
     RVC_AVAILABLE = False
 
 # Optional system resource monitoring
@@ -415,10 +426,9 @@ class CharacterVoiceConverter:
                     sys.executable, "-m", "pip", "install", "-q", "--no-deps", "rvc-python"
                 ])
                 _patch_tensorboard_for_fairseq()
-                from rvc_python.infer import RVCInference, infer_file
+                from rvc_python.infer import RVCInference
                 globals()["RVC_AVAILABLE"] = True
                 globals()["RVCInference"] = RVCInference
-                globals()["infer_file"] = infer_file
                 print("✅ [RVC AUTO-INSTALL] RVC inference engine installed successfully!")
             except Exception as e:
                 print(f"⚠️ [RVC NOTICE] 'rvc-python' not installed ({e}). Falling back to base TTS.")
