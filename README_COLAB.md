@@ -1,11 +1,11 @@
 # 🍥 NarutoGen - Google Colab Setup Guide
 
-Follow these exact steps in Google Colab (Free Tier T4 GPU).
+Follow these exact steps in Google Colab (Free Tier T4 GPU) to run the Kokoro-82M + RVC Voice Dubbing Pipeline.
 
 ---
 
 ### Step 0: Set Runtime to GPU
-1. In Google Colab top menu, click **Runtime** (रनटाइम) &rarr; **Change runtime type** (रनटाइम प्रकार बदलें).
+1. In Google Colab top menu, click **Runtime** &rarr; **Change runtime type**.
 2. Under **Hardware accelerator**, select **T4 GPU**.
 3. Click **Save**.
 
@@ -24,7 +24,7 @@ if not os.path.exists('/content/narutogen'):
 
 ### Cell 2: Install Dependencies & RVC GPU Support
 ```bash
-!apt-get update -qq && apt-get install -y ffmpeg
+!apt-get update -qq && apt-get install -y ffmpeg espeak-ng
 !pip install -q "numpy<2.0.0" av ffmpeg-python loguru praat-parselmouth
 !pip install -q -r requirements.txt
 !pip install -q fairseq-fixed pyworld-fixed torchcrepe faiss-cpu
@@ -33,27 +33,17 @@ if not os.path.exists('/content/narutogen'):
 
 ---
 
-### Cell 3: Download & Setup Naruto RVC Model
-Automatically downloads `naruto-uzumaki.zip` (56 MB) from Hugging Face and extracts it into `models/naruto/`, `weights/`, and `logs/naruto/`:
+### Cell 3: Download & Setup Configured RVC Model
+Automatically downloads the configured RVC model (CarryMinati / Naruto / custom voice) from Hugging Face into `models/character/` and `weights/`:
 ```bash
 !python -m modules.model_downloader
 ```
 
 ---
 
-### Cell 4: Run (Choose Option A or Option B)
-
-#### Option A: Launch Interactive Web UI (Recommended)
+### Cell 4: Launch Minimalist Gradio Web UI
 ```bash
 !python dubbing_pipeline.py
 ```
-*Click the public `https://xxxx.gradio.live` link generated in the terminal to upload SRTs, adjust pitch, select languages (Hindi, Spanish, French, Portuguese), and download the master audio.*
+*Click the public `https://xxxx.gradio.live` link generated in the terminal to upload your `.srt` file, set video duration, pick your target language (Hindi, Spanish, French, Portuguese), and click **Start Dubbing**!*
 
-#### Option B: Run Fast Command-Line Pipeline
-```bash
-# Dub Hindi SRT:
-!python pipeline.py --input inputs/sample_hindi_english.srt --output outputs/naruto_master.wav
-
-# Dub with Portuguese base voice:
-!python pipeline.py --input inputs/sample_hindi_english.srt --voice pt_antonio --output outputs/naruto_master_pt.wav
-```

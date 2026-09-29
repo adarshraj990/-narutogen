@@ -1,19 +1,16 @@
 """
 ====================================================================================================
-🍥 NARUTOGEN: HIGH-EFFICIENCY AI ANIME DUBBING PIPELINE
+🍥 NARUTOGEN: STREAMLINED KOKORO-82M + RVC DUBBING PIPELINE
 ====================================================================================================
-Architecture: Two-Step High-Speed Hybrid (Lightweight Neural TTS + RVC Voice Conversion)
-- Target Environment: Google Colab Free Tier (NVIDIA T4 GPU, 16GB RAM)
-- Performance Target: Up to 2-hour anime episode/movie dubbed in under 15-30 minutes.
-- Zero OOM Crashes: Decouples text synthesis (CPU async) from voice conversion (RMVPE GPU).
-
-Pipeline Stages:
-1. SRT Parsing: Cleans formatting/HTML tags, extracts exact millisecond timestamps and dialogue text.
-2. Step 1 (Ultra-Fast TTS): Asynchronous Edge-TTS generates standard Hindi/Hinglish speech in ~1-2 mins.
-3. Step 2 (RVC Voice Conversion): RMVPE pitch extraction transforms speech into target character
-   (e.g., Naruto) using pre-trained .pth and .index model weights.
-4. Time Synchronization: Pitch-preserving time-stretching (librosa/pydub) ensures exact lip-sync.
-5. Canvas Assembly & Muxing: Assembles full-length master track and muxes with original video via FFmpeg.
+Architecture: Two-Step High-Fidelity Local Voice Generation & Conversion
+1. Step 1 (Local Neural TTS): Kokoro-82M generates expressive, high-quality base audio (.wav) locally.
+   - 100% Free, NO API keys, NO cloud subscriptions, runs entirely local / offline.
+   - Multi-Language Support: Hindi, Spanish, French, and Portuguese.
+2. Step 2 (Voice Conversion): RVC V2 (Retrieval-based Voice Conversion) with RMVPE pitch extraction
+   transforms base audio into the desired character or creator voice (e.g., CarryMinati / Naruto).
+3. Step 3 (Time-Sync & Assembly): Phase vocoder time-stretching matches dialogue to exact SRT timestamps,
+   slicing in 15-minute windows for zero RAM bloat.
+4. Minimalist Web UI: Clean Gradio interface with only SRT upload, duration, language dropdown, and dub button.
 ====================================================================================================
 """
 
@@ -24,61 +21,55 @@ import sys
 import time
 import math
 import shutil
-import asyncio
 import tempfile
-import threading
-import subprocess
 from pathlib import Path
 from typing import List, Tuple, Dict, Any, Optional
 
 import numpy as np
 import soundfile as sf
 from pydub import AudioSegment
-import gradio as gr
+try:
+    import gradio as gr
+    GRADIO_AVAILABLE = True
+except ImportError:
+    gr = None  # type: ignore
+    GRADIO_AVAILABLE = False
 
 # Try importing librosa with graceful fallback
 try:
-    import librosa
+    import librosa  # type: ignore
     LIBROSA_AVAILABLE = True
 except ImportError:
-    librosa = None
+    librosa = None  # type: ignore
     LIBROSA_AVAILABLE = False
 
 # Try importing pysrt with graceful fallback
 try:
-    import pysrt
+    import pysrt  # type: ignore
     PYSRT_AVAILABLE = True
 except ImportError:
-    pysrt = None
+    pysrt = None  # type: ignore
     PYSRT_AVAILABLE = False
 
-# Try importing Edge-TTS with graceful auto-install
-try:
-    import edge_tts
-    EDGE_TTS_AVAILABLE = True
-except ImportError:
-    try:
-        import subprocess
-        print("⚡ [AUTO-INSTALL] 'edge-tts' not found in environment. Installing now...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "edge-tts>=6.1.10"])
-        import edge_tts
-        EDGE_TTS_AVAILABLE = True
-        print("✅ [AUTO-INSTALL] 'edge-tts' installed successfully!")
-    except Exception as e:
-        print(f"⚠️ [AUTO-INSTALL NOTICE] Could not install edge-tts: {e}")
-        edge_tts = None
-        EDGE_TTS_AVAILABLE = False
+# ==================================================================================================
+# 1. KOKORO-82M LOCAL TTS ENGINE (REPLACES EDGE-TTS COMPLETELY)
+# ==================================================================================================
+KOKORO_AVAILABLE = False
+KPipeline = None  # type: ignore
 
-# --------------------------------------------------------------------------------------------------
-# Patch TensorBoard / TensorFlow compatibility shim for FairSeq & RVC
-# --------------------------------------------------------------------------------------------------
+try:
+    from kokoro import KPipeline as _KP  # type: ignore
+    KPipeline = _KP
+    KOKORO_AVAILABLE = True
+except ImportError:
+    KPipeline = None
+    KOKORO_AVAILABLE = False
+
+# ==================================================================================================
+# 2. PATCH TENSORBOARD SHIM FOR FAIRSEQ & RVC
+# ==================================================================================================
 def _patch_tensorboard_for_fairseq():
-    """
-    Prevents `ImportError: cannot import name 'notf' from 'tensorboard.compat'`
-    which occurs in Python 3.13 / Ubuntu 24.04 Colab when fairseq imports torch.utils.tensorboard.
-    Neither FairSeq Hubert extraction nor RVC inference uses TensorBoard.
-    """
-    import sys
+    """Prevents TensorBoard compatibility crashes on Colab when FairSeq is imported."""
     from unittest.mock import MagicMock
 
     try:
@@ -107,7 +98,7 @@ _patch_tensorboard_for_fairseq()
 
 # In PyTorch 2.6+, torch.load defaults to weights_only=True which breaks RVC checkpoints
 try:
-    import torch
+    import torch  # type: ignore
     _orig_torch_load = torch.load
     def _patched_torch_load(*args, **kwargs):
         if "weights_only" not in kwargs:
@@ -117,102 +108,101 @@ try:
 except Exception:
     pass
 
-# Try importing RVC (rvc_python.infer exports RVCInference; infer_file is a method of the class)
+# Try importing RVC
 RVCInference: Any = None
+RVC_AVAILABLE = False
 try:
-    from rvc_python.infer import RVCInference  # type: ignore
+    from rvc_python.infer import RVCInference as _RVCClass  # type: ignore
+    RVCInference = _RVCClass
     RVC_AVAILABLE = True
-except Exception as _rvc_err:
+except Exception:
     RVCInference = None
     RVC_AVAILABLE = False
 
 # Optional system resource monitoring
 try:
-    import psutil
+    import psutil  # type: ignore
 except ImportError:
-    psutil = None
+    psutil = None  # type: ignore
+
 
 # ==================================================================================================
-# CONSTANTS & CONFIGURATION
+# 3. GLOBAL CONFIGURATION & MODEL PLACEHOLDER
 # ==================================================================================================
+# 📌 RVC MODEL DOWNLOAD URL PLACEHOLDER:
+# You can paste any direct Hugging Face download link (.zip containing .pth and .index) below:
+CONFIGURED_RVC_MODEL_URL = (
+    "https://huggingface.co/ivaan2003/ai-rvc/resolve/main/CarryMinati%20-%20Ajey%20Nagar%20-%20Weights.gg%20Model.zip"
+)
+
 SAMPLE_RATE = 44100          # High-fidelity sample rate for RVC output
+KOKORO_SAMPLE_RATE = 24000   # Native sample rate for Kokoro-82M
 FLUSH_INTERVAL_MINUTES = 15  # 15-minute slice window for memory safety
 FLUSH_INTERVAL_MS = FLUSH_INTERVAL_MINUTES * 60 * 1000  # 900,000 ms
 
-# Target Dubbing Languages (Edge-TTS Base Neural Voices)
+# Target Dubbing Languages (Kokoro-82M Neural Base Voices)
 TARGET_LANGUAGES = {
-    "Hindi (Madhur TTS)": "hi-IN-MadhurNeural",
-    "Spanish": "es-ES-AlvaroNeural",
-    "French": "fr-FR-HenriNeural",
-    "Portuguese": "pt-BR-AntonioNeural",
+    "Hindi (Kokoro TTS)": {"lang_code": "h", "voice": "hm_omega", "name": "Hindi Male (Omega)"},
+    "Spanish": {"lang_code": "e", "voice": "em_alex", "name": "Spanish Male (Alex)"},
+    "French": {"lang_code": "f", "voice": "ff_siwis", "name": "French Female (Siwis)"},
+    "Portuguese": {"lang_code": "p", "voice": "pm_alex", "name": "Portuguese Male (Alex)"},
 }
 
+# In-memory pipeline cache
+_KOKORO_PIPELINES: Dict[str, Any] = {}
 
-# ==================================================================================================
-# 1. UTILITIES & RESOURCE MONITORING
-# ==================================================================================================
+
 def get_memory_stats() -> str:
-    """Returns human-readable RAM and VRAM utilization string."""
-    stats = []
+    """Returns formatted system RAM and GPU VRAM usage."""
+    ram_str = "RAM: N/A"
     if psutil:
-        ram = psutil.virtual_memory()
-        stats.append(f"RAM: {ram.used / (1024**3):.1f}/{ram.total / (1024**3):.1f}GB ({ram.percent}%)")
+        mem = psutil.virtual_memory()
+        ram_str = f"RAM: {mem.used / (1024**3):.1f}/{mem.total / (1024**3):.1f}GB ({mem.percent}%)"
+
+    vram_str = ""
     try:
-        import torch
+        import torch  # type: ignore
         if torch.cuda.is_available():
-            vram_alloc = torch.cuda.memory_allocated() / (1024**3)
-            vram_res = torch.cuda.memory_reserved() / (1024**3)
-            stats.append(f"VRAM: {vram_alloc:.2f}GB alloc ({vram_res:.2f}GB res)")
+            alloc = torch.cuda.memory_allocated() / (1024**3)
+            res = torch.cuda.memory_reserved() / (1024**3)
+            vram_str = f" | VRAM: {alloc:.2f}GB alloc ({res:.2f}GB res)"
     except Exception:
         pass
-    return " | ".join(stats) if stats else "Monitoring unavailable"
-
-
-def clean_subtitle_text(text: str) -> str:
-    """Cleans SRT formatting artifacts, tags, linebreaks, and non-dialogue annotations."""
-    text = re.sub(r"<[^>]+>", "", text)
-    text = re.sub(r"\[.*?\]|\(.*?\)", "", text)
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
-
-
-def probe_video_duration(video_path: str) -> Optional[int]:
-    """Uses ffprobe to extract exact video duration in milliseconds."""
-    if not shutil.which("ffprobe") or not os.path.exists(video_path):
-        return None
-    try:
-        cmd = [
-            "ffprobe",
-            "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
-            video_path,
-        ]
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
-        dur_sec = float(res.stdout.strip())
-        return int(dur_sec * 1000)
-    except Exception as e:
-        print(f"⚠️ [PROBE WARNING] Could not probe video duration: {e}")
-        return None
+    return f"{ram_str}{vram_str}"
 
 
 # ==================================================================================================
-# 2. SRT PARSING
+# 4. SRT SUBTITLE PARSER
 # ==================================================================================================
 class SubtitleCue:
+    """Data representation of a single subtitle dialogue."""
     def __init__(self, cue_id: int, start_ms: int, end_ms: int, text: str):
         self.cue_id = cue_id
         self.start_ms = start_ms
         self.end_ms = end_ms
         self.target_dur_ms = max(200, end_ms - start_ms)
         self.text = text
+        self.base_wav_path: Optional[str] = None
+        self.rvc_wav_path: Optional[str] = None
 
     def __repr__(self):
         return f"<Cue #{self.cue_id} [{self.start_ms}ms -> {self.end_ms}ms ({self.target_dur_ms}ms)]: '{self.text[:20]}...'>"
 
 
+def clean_subtitle_text(text: str) -> str:
+    """Cleans dialogue text by stripping HTML tags, subtitle formatting, and sound effect annotations."""
+    if not text:
+        return ""
+    text = re.sub(r"<[^>]+>", "", text)
+    text = re.sub(r"\[.*?\]", "", text)
+    text = re.sub(r"\(.*?\)", "", text)
+    text = re.sub(r"\{.*?\}", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
 def parse_srt_file(srt_path: str, total_video_ms: int) -> Tuple[List[SubtitleCue], int]:
-    """Parses SRT, cleans dialogue text, filters empty cues, and checks boundary conditions."""
+    """Parses SRT subtitles, cleans text, and auto-expands canvas if needed."""
     print(f"📄 [SRT] Parsing subtitles from: {srt_path}")
     cues = []
 
@@ -228,35 +218,35 @@ def parse_srt_file(srt_path: str, total_video_ms: int) -> Tuple[List[SubtitleCue
                 if end_ms <= start_ms:
                     end_ms = start_ms + 1000
                 cues.append(SubtitleCue(i, start_ms, end_ms, clean_txt))
-        except Exception as e:
-            print(f"⚠️ [SRT WARNING] pysrt parse error: {e}. Falling back to built-in parser.")
+        except Exception:
             cues = []
 
     if not cues:
-        # Robust pure-Python regex parser (zero external dependencies)
+        # Robust pure-Python regex parser (handles all line endings)
         with open(srt_path, "r", encoding="utf-8-sig", errors="ignore") as f:
-            content = f.read()
+            content = f.read().replace("\r\n", "\n")
 
         blocks = re.split(r"\n\s*\n", content.strip())
         pattern = re.compile(
             r"(\d+)\s*\n\s*(\d{2}:\d{2}:\d{2}[,\.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,\.]\d{3})\s*\n([\s\S]+)"
         )
+
+        def _parse_ts(ts_str):
+            ts_str = ts_str.strip().replace(",", ".")
+            parts = ts_str.split(":")
+            if len(parts) == 3:
+                h = int(parts[0])
+                m = int(parts[1])
+                s_parts = parts[2].split(".")
+                s = int(s_parts[0])
+                ms = int(s_parts[1].ljust(3, "0")[:3]) if len(s_parts) > 1 else 0
+                return ((h * 3600) + (m * 60) + s) * 1000 + ms
+            return 0
+
         for block in blocks:
             match = pattern.search(block.strip())
             if match:
                 idx = int(match.group(1))
-                def _parse_ts(ts_str):
-                    ts_str = ts_str.strip().replace(",", ".")
-                    parts = ts_str.split(":")
-                    if len(parts) == 3:
-                        h = int(parts[0])
-                        m = int(parts[1])
-                        s_parts = parts[2].split(".")
-                        s = int(s_parts[0])
-                        ms = int(s_parts[1].ljust(3, "0")[:3]) if len(s_parts) > 1 else 0
-                        return ((h * 3600) + (m * 60) + s) * 1000 + ms
-                    return 0
-
                 start_ms = _parse_ts(match.group(2))
                 end_ms = _parse_ts(match.group(3))
                 clean_txt = clean_subtitle_text(match.group(4))
@@ -267,97 +257,115 @@ def parse_srt_file(srt_path: str, total_video_ms: int) -> Tuple[List[SubtitleCue
 
     print(f"✅ [SRT] Successfully loaded {len(cues)} valid dialogue cues.")
 
-    # Auto-expand master canvas if subtitles exceed initial user duration
+    # Expand canvas if subtitles exceed video duration
     adjusted_video_ms = total_video_ms
     if cues and cues[-1].end_ms > total_video_ms:
         overhang_sec = (cues[-1].end_ms - total_video_ms) / 1000.0
-        print(f"⚠️ [CANVAS EXPANSION] Last dialogue ends at {cues[-1].end_ms / 1000:.1f}s, past initial canvas ({total_video_ms / 1000:.1f}s).")
-        print(f"👉 Expanding canvas by {overhang_sec:.1f}s to guarantee dialogue is never cut off.")
+        print(f"⚠️ [CANVAS] Expanding canvas by {overhang_sec:.1f}s to guarantee dialogue is never cut off.")
         adjusted_video_ms = cues[-1].end_ms + 2000
 
     return cues, adjusted_video_ms
 
 
 # ==================================================================================================
-# 3. STEP 1: ULTRA-FAST ASYNC BASELINE TTS GENERATION (Edge-TTS)
+# 5. STEP 1: KOKORO-82M LOCAL BATCH SYNTHESIZER
 # ==================================================================================================
-async def _async_generate_single_cue(
-    cue: SubtitleCue,
-    voice: str,
-    output_path: str,
-    semaphore: asyncio.Semaphore,
-    rate: str = "+0%",
-) -> bool:
-    """Generates a single dialogue audio file via Edge-TTS under concurrency control."""
-    async with semaphore:
-        if edge_tts is None:
-            print(f"⚠️ [TTS ERROR] 'edge-tts' not imported.")
-            silence = AudioSegment.silent(duration=cue.target_dur_ms, frame_rate=SAMPLE_RATE)
-            silence.export(output_path, format="wav")
-            return False
+def get_kokoro_pipeline(lang_code: str = "h") -> Any:
+    """Returns or loads a cached KPipeline instance."""
+    global _KOKORO_PIPELINES, KPipeline, KOKORO_AVAILABLE
+
+    if not KOKORO_AVAILABLE or KPipeline is None:
         try:
-            communicate = edge_tts.Communicate(cue.text, voice, rate=rate)
-            await communicate.save(output_path)
-            return True
-        except Exception as e:
-            print(f"⚠️ [TTS ERROR] Cue #{cue.cue_id} failed: {e}")
-            # Generate fallback silence
-            silence = AudioSegment.silent(duration=cue.target_dur_ms, frame_rate=SAMPLE_RATE)
-            silence.export(output_path, format="wav")
-            return False
+            from kokoro import KPipeline as _KP  # type: ignore
+            KPipeline = _KP
+            KOKORO_AVAILABLE = True
+        except ImportError:
+            raise RuntimeError(
+                "Kokoro-82M TTS is not installed.\n"
+                "Please run: pip install kokoro soundfile misaki"
+            )
+
+    lang_code = lang_code.lower()
+    if lang_code not in _KOKORO_PIPELINES:
+        print(f"📦 [KOKORO TTS] Initializing Kokoro-82M pipeline for language '{lang_code}'...")
+        _KOKORO_PIPELINES[lang_code] = KPipeline(lang_code=lang_code)
+        print(f"✅ [KOKORO TTS] Kokoro pipeline ready for language '{lang_code}'.")
+
+    return _KOKORO_PIPELINES[lang_code]
 
 
-async def batch_generate_tts(
-    cues: List[SubtitleCue],
+def synthesize_single_cue_kokoro(
+    cue: SubtitleCue,
+    pipeline: Any,
     voice: str,
-    tts_output_dir: Path,
-    concurrency: int = 12,
+    output_wav_path: Path,
+    speed: float = 1.0,
+) -> Path:
+    """Generates audio for a single cue using Kokoro-82M and writes a 24kHz WAV file."""
+    audio_segments = []
+    try:
+        for _, _, audio in pipeline(cue.text, voice=voice, speed=speed):
+            if audio is not None and len(audio) > 0:
+                if hasattr(audio, "cpu"):
+                    audio = audio.cpu().numpy()
+                audio_segments.append(audio)
+
+        if audio_segments:
+            merged = np.concatenate(audio_segments)
+        else:
+            silence_samples = int(KOKORO_SAMPLE_RATE * (cue.target_dur_ms / 1000.0))
+            merged = np.zeros(max(2400, silence_samples), dtype=np.float32)
+
+        sf.write(str(output_wav_path), merged, KOKORO_SAMPLE_RATE)
+        cue.base_wav_path = str(output_wav_path)
+        return output_wav_path
+
+    except Exception as e:
+        print(f"⚠️ [KOKORO SYNTHESIS NOTICE] Cue #{cue.cue_id}: {e}")
+        silence_samples = int(KOKORO_SAMPLE_RATE * (cue.target_dur_ms / 1000.0))
+        merged = np.zeros(max(2400, silence_samples), dtype=np.float32)
+        sf.write(str(output_wav_path), merged, KOKORO_SAMPLE_RATE)
+        cue.base_wav_path = str(output_wav_path)
+        return output_wav_path
+
+
+def batch_generate_kokoro_tts(
+    cues: List[SubtitleCue],
+    lang_code: str = "h",
+    voice: str = "hm_omega",
+    tts_output_dir: Path = Path("./temp_kokoro"),
     progress_callback=None,
 ) -> List[Tuple[SubtitleCue, Path]]:
-    """
-    Executes concurrent Edge-TTS synthesis for all subtitles.
-    Generates 1,000+ subtitles in under 60-90 seconds.
-    """
-    global edge_tts, EDGE_TTS_AVAILABLE
-    if not EDGE_TTS_AVAILABLE or edge_tts is None:
-        try:
-            import subprocess
-            print("⚡ [TTS SETUP] 'edge-tts' missing. Auto-installing now...")
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "edge-tts>=6.1.10"])
-            import edge_tts
-            EDGE_TTS_AVAILABLE = True
-            print("✅ [TTS SETUP] 'edge-tts' ready!")
-        except Exception as e:
-            raise RuntimeError(f"Edge-TTS is required for synthesis: {e}. Run '!pip install edge-tts'.")
-
-    print(f"\n⚡ [STEP 1: TTS] Starting async synthesis for {len(cues)} cues using voice '{voice}'...")
-    semaphore = asyncio.Semaphore(concurrency)
+    """Synthesizes all dialogue cues locally using Kokoro-82M."""
+    print(f"\n⚡ [STEP 1: KOKORO TTS] Starting local neural synthesis for {len(cues)} cues (Lang: '{lang_code}', Voice: '{voice}')...")
     tts_output_dir.mkdir(parents=True, exist_ok=True)
 
-    tasks = []
+    pipeline = get_kokoro_pipeline(lang_code)
     cue_file_pairs = []
+    total = len(cues)
+    start_time = time.time()
 
-    for cue in cues:
-        out_file = tts_output_dir / f"cue_{cue.cue_id:04d}.wav"
+    for i, cue in enumerate(cues, start=1):
+        out_file = tts_output_dir / f"cue_{cue.cue_id:04d}_kokoro.wav"
+        synthesize_single_cue_kokoro(cue, pipeline, voice=voice, output_wav_path=out_file)
         cue_file_pairs.append((cue, out_file))
-        tasks.append(_async_generate_single_cue(cue, voice, str(out_file), semaphore))
 
-    total = len(tasks)
-    completed = 0
-
-    for f in asyncio.as_completed(tasks):
-        await f
-        completed += 1
         if progress_callback and total > 0:
-            frac = 0.05 + (completed / total) * 0.20  # 5% to 25%
-            progress_callback(frac, desc=f"⚡ [Step 1/3] Generating TTS: {completed}/{total} cues...")
+            frac = 0.05 + (i / total) * 0.25  # 5% to 30%
+            progress_callback(frac, desc=f"⚡ [Step 1/3] Kokoro TTS: {i}/{total} cues...")
 
-    print(f"✅ [STEP 1: TTS] Completed {len(cues)} cues in record time! {get_memory_stats()}")
+        if i % 25 == 0 or i == total:
+            elapsed = time.time() - start_time
+            rate = i / max(0.001, elapsed)
+            print(f"   ↳ [Kokoro Progress] {i}/{total} cues ({rate:.1f} cues/sec)")
+
+    total_time = time.time() - start_time
+    print(f"✅ [STEP 1: KOKORO TTS] Completed {len(cues)} cues in {total_time:.2f}s! {get_memory_stats()}")
     return cue_file_pairs
 
 
 # ==================================================================================================
-# 4. STEP 2: RVC VOICE CONVERSION WITH RMVPE PITCH EXTRACTION
+# 6. STEP 2: RVC VOICE CONVERSION WITH RMVPE PITCH EXTRACTION
 # ==================================================================================================
 class CharacterVoiceConverter:
     """Handles RVC voice conversion using pre-trained .pth weights and .index files."""
@@ -372,6 +380,7 @@ class CharacterVoiceConverter:
         protect: float = 0.33,
         filter_radius: int = 3,
         resample_sr: int = 0,
+        model_url: str = CONFIGURED_RVC_MODEL_URL,
     ):
         self.model_path = model_path
         self.index_path = index_path
@@ -381,42 +390,47 @@ class CharacterVoiceConverter:
         self.protect = protect
         self.filter_radius = filter_radius
         self.resample_sr = resample_sr
+        self.model_url = model_url
         self.engine = None
 
-        # Auto-detect Naruto model if not explicitly specified
+        # Auto-detect character model or download from model_url
         if not self.model_path or not os.path.exists(self.model_path):
             candidates = [
+                Path("models/character/character.pth"),
+                Path("weights/character.pth"),
                 Path("models/naruto/naruto.pth"),
                 Path("weights/naruto.pth"),
-                Path("weights/naruto-uzumaki-by-mboisuper.pth"),
             ]
+            candidates.extend(list(Path("weights").glob("*.pth")) if Path("weights").exists() else [])
+            candidates.extend(list(Path("models").rglob("*.pth")) if Path("models").exists() else [])
+
             for cand in candidates:
-                if cand.exists():
+                if cand.exists() and cand.stat().st_size > 10_000_000:
                     self.model_path = str(cand.resolve())
                     if not self.index_path:
                         idx_cand = cand.with_suffix(".index")
                         if idx_cand.exists():
                             self.index_path = str(idx_cand.resolve())
-                        elif Path("models/naruto/naruto.index").exists():
-                            self.index_path = str(Path("models/naruto/naruto.index").resolve())
-            # If still not found, automatically download and set up Naruto model
+                    break
+
+            # If still not found, automatically download the configured RVC model
             if not self.model_path or not os.path.exists(self.model_path):
                 try:
-                    from modules.model_downloader import ensure_naruto_model
-                    print("🍥 [RVC BACKEND] Naruto model not found locally. Automatically downloading...")
-                    m_info = ensure_naruto_model()
+                    from modules.model_downloader import ensure_character_model
+                    print(f"🎙️ [RVC SETUP] Model weights not found locally. Auto-downloading from configured URL...")
+                    m_info = ensure_character_model(url=self.model_url)
                     self.model_path = m_info.get("model_path")
                     self.index_path = m_info.get("index_path")
                 except Exception as e:
-                    print(f"💡 [RVC AUTO-SETUP] Could not download Naruto model: {e}")
+                    print(f"💡 [RVC AUTO-SETUP] Could not download RVC model: {e}")
 
         if self.model_path and os.path.exists(self.model_path):
             self._init_rvc_engine()
         else:
-            print("💡 [RVC] Running in High-Speed Base TTS Mode.")
+            print("💡 [RVC] Running in High-Speed Base Kokoro TTS Mode.")
 
     def _init_rvc_engine(self):
-        """Initializes the RVC engine."""
+        """Initializes the RVC engine with GPU support."""
         global RVCInference, RVC_AVAILABLE
         print(f"\n🎙️ [STEP 2: RVC] Initializing RVC Engine with model: {Path(self.model_path).name}...")
         if not RVC_AVAILABLE or RVCInference is None:
@@ -475,7 +489,6 @@ class CharacterVoiceConverter:
     def convert_file(self, input_wav: Path, output_wav: Path) -> bool:
         """Converts a single audio file to target character voice."""
         if not self.engine:
-            # Pass-through baseline TTS audio if RVC is not enabled
             shutil.copyfile(input_wav, output_wav)
             return True
 
@@ -487,7 +500,6 @@ class CharacterVoiceConverter:
                     index_rate=self.index_rate,
                     protect=self.protect,
                 )
-            # RVCInference in rvc-python expects infer_file(input_path, output_path)
             try:
                 self.engine.infer_file(str(input_wav), str(output_wav))
             except TypeError:
@@ -509,72 +521,76 @@ class CharacterVoiceConverter:
         rvc_output_dir: Path,
         progress_callback=None,
     ) -> List[Tuple[SubtitleCue, Path]]:
-        """Batch-converts all dialogue snippets to the target anime character voice."""
+        """Batch-converts all dialogue snippets to the target voice."""
         rvc_output_dir.mkdir(parents=True, exist_ok=True)
         total = len(cue_file_pairs)
 
         if not self.engine:
-            print("⚡ [STEP 2: RVC] Skipping RVC (Base TTS mode active).")
+            print("⚡ [STEP 2: RVC] Skipping RVC (Base Kokoro TTS mode active).")
             return cue_file_pairs
 
         print(f"\n🍥 [STEP 2: RVC] Batch-converting {total} cues to character voice (Pitch: {self.pitch_shift}, RMVPE)...")
         results = []
-
         start_time = time.time()
-        for i, (cue, input_file) in enumerate(cue_file_pairs, start=1):
-            out_file = rvc_output_dir / f"rvc_{cue.cue_id:04d}.wav"
-            self.convert_file(input_file, out_file)
-            results.append((cue, out_file))
+
+        for idx, (cue, base_wav) in enumerate(cue_file_pairs, start=1):
+            out_rvc_wav = rvc_output_dir / f"cue_{cue.cue_id:04d}_rvc.wav"
+            self.convert_file(base_wav, out_rvc_wav)
+            cue.rvc_wav_path = str(out_rvc_wav)
+            results.append((cue, out_rvc_wav))
+
+            # Periodic GPU VRAM clearing to prevent OOM
+            if idx % 20 == 0:
+                try:
+                    import torch  # type: ignore
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except Exception:
+                    pass
+                gc.collect()
 
             if progress_callback and total > 0:
-                frac = 0.25 + (i / total) * 0.55  # 25% to 80%
-                progress_callback(frac, desc=f"🍥 [Step 2/3] RVC Voice Conversion: {i}/{total} cues (RMVPE)...")
+                frac = 0.30 + (idx / total) * 0.50  # 30% to 80%
+                progress_callback(frac, desc=f"🍥 [Step 2/3] RVC Converting: {idx}/{total} cues (RMVPE)...")
 
-            if i % 25 == 0 or i == total:
+            if idx % 20 == 0 or idx == total:
                 elapsed = time.time() - start_time
-                speed = i / max(1e-5, elapsed)
-                print(f"⚡ [RVC PROGRESS] Converted {i}/{total} cues ({speed:.1f} cues/sec) | {get_memory_stats()}")
+                rate = idx / max(0.001, elapsed)
+                print(f"   ↳ [RVC Progress] {idx}/{total} cues ({rate:.1f} cues/sec)")
 
-        print(f"✅ [STEP 2: RVC] Character Voice Conversion Complete in {(time.time() - start_time)/60:.2f} mins!")
+        total_time = time.time() - start_time
+        print(f"✅ [STEP 2: RVC] Completed {total} voice conversions in {total_time:.2f}s ({total_time/60:.2f} mins)! {get_memory_stats()}")
         return results
 
 
 # ==================================================================================================
-# 5. STEP 3: EXACT TIME-SYNCHRONIZATION & MASTER CANVAS COMPOSITING
+# 7. STEP 3: TIME-SYNCHRONIZATION & MASTER TIMELINE CANVAS ASSEMBLY
 # ==================================================================================================
 def time_sync_audio_file(audio_path: Path, target_dur_ms: int) -> AudioSegment:
     """
-    Time-syncs audio file to exact SRT target duration:
-    - If generated > target: High-fidelity phase vocoder speedup (without pitch alteration).
-    - If generated < target: Silence padding to match exact timestamp.
+    Fits audio chunk to the exact subtitle duration:
+    - If audio is too long: pitch-preserving time-stretch (librosa phase vocoder).
+    - If audio is too short: natural silence padding.
     """
     try:
-        if LIBROSA_AVAILABLE and librosa:
-            y, sr = librosa.load(str(audio_path), sr=SAMPLE_RATE, mono=True)
-        else:
-            y, sr = sf.read(str(audio_path), dtype="float32")
-            if y.ndim > 1:
-                y = np.mean(y, axis=1)
+        y, sr = sf.read(str(audio_path), dtype="float32")
+        if len(y.shape) > 1:
+            y = y.mean(axis=1)
 
-        actual_dur_ms = int(len(y) / sr * 1000)
+        actual_dur_ms = int(round((len(y) / sr) * 1000.0))
 
-        if actual_dur_ms > target_dur_ms:
-            speed_ratio = actual_dur_ms / target_dur_ms
-            capped_ratio = min(speed_ratio, 1.8)  # Cap speedup to avoid unnatural rush
-            if LIBROSA_AVAILABLE and librosa:
-                stretched = librosa.effects.time_stretch(y, rate=capped_ratio)
-            else:
-                new_len = int(len(y) / capped_ratio)
-                stretched = np.interp(np.linspace(0, len(y), new_len), np.arange(len(y)), y)
+        if actual_dur_ms > target_dur_ms and LIBROSA_AVAILABLE and librosa:
+            rate = float(actual_dur_ms) / float(target_dur_ms)
+            rate = min(rate, 2.5)  # Cap compression at 2.5x to preserve intelligibility
+            y_stretched = librosa.effects.time_stretch(y, rate=rate)
+            stretched_int16 = (np.clip(y_stretched, -1.0, 1.0) * 32767).astype(np.int16)
 
-            stretched_int16 = (np.clip(stretched, -1.0, 1.0) * 32767).astype(np.int16)
             seg = AudioSegment(
                 data=stretched_int16.tobytes(),
                 sample_width=2,
                 frame_rate=sr,
                 channels=1,
             )
-            # Micro-trim or pad
             if len(seg) > target_dur_ms:
                 seg = seg[:target_dur_ms]
             elif len(seg) < target_dur_ms:
@@ -601,8 +617,7 @@ def time_sync_audio_file(audio_path: Path, target_dur_ms: int) -> AudioSegment:
                 channels=1,
             )
 
-    except Exception as e:
-        print(f"⚠️ [TIME-SYNC FALLBACK] {audio_path.name}: {e}")
+    except Exception:
         seg = AudioSegment.from_file(str(audio_path))
         if len(seg) > target_dur_ms:
             return seg[:target_dur_ms]
@@ -618,10 +633,7 @@ def assemble_master_audio(
     parts_dir: Path,
     progress_callback=None,
 ) -> Path:
-    """
-    Overlays synced dialogue chunks onto the master timeline canvas.
-    Flushes 15-minute segments to disk to ensure 100% safety against Colab 12GB RAM crashes.
-    """
+    """Overlays dialogue onto the timeline, flushing 15-min windows to disk for zero-OOM safety."""
     print(f"\n🎧 [STEP 3: SYNC & ASSEMBLY] Assembling master canvas ({total_video_ms/1000/60:.2f} mins)...")
     parts_dir.mkdir(parents=True, exist_ok=True)
 
@@ -636,14 +648,12 @@ def assemble_master_audio(
 
     active_canvas = init_window_canvas(current_window_idx)
     overflow_buffer: List[Tuple[int, AudioSegment]] = []
-
     total_cues = len(cue_file_pairs)
 
     for i, (cue, audio_file) in enumerate(cue_file_pairs, start=1):
         synced_seg = time_sync_audio_file(audio_file, cue.target_dur_ms)
         cue_window_idx = cue.start_ms // FLUSH_INTERVAL_MS
 
-        # Advance windows if this cue starts in a future window
         while cue_window_idx > current_window_idx:
             part_num = current_window_idx + 1
             part_path = parts_dir / f"part_{part_num:03d}.wav"
@@ -665,7 +675,6 @@ def assemble_master_audio(
         local_pos_ms = cue.start_ms - win_start_ms
         win_dur_ms = len(active_canvas)
 
-        # Boundary split handling
         if local_pos_ms + len(synced_seg) > win_dur_ms:
             split_point = win_dur_ms - local_pos_ms
             current_slice = synced_seg[:split_point]
@@ -677,7 +686,7 @@ def assemble_master_audio(
             active_canvas = active_canvas.overlay(synced_seg, position=local_pos_ms)
 
         if progress_callback and total_cues > 0:
-            frac = 0.80 + (i / total_cues) * 0.12  # 80% to 92%
+            frac = 0.80 + (i / total_cues) * 0.15  # 80% to 95%
             progress_callback(frac, desc=f"🎧 [Step 3/3] Synchronizing dialogue {i}/{total_cues}...")
 
     # Flush final window
@@ -694,7 +703,6 @@ def assemble_master_audio(
         part_num = current_window_idx + 1
         part_path = parts_dir / f"part_{part_num:03d}.wav"
         trailing_canvas = init_window_canvas(current_window_idx)
-        print(f"🎵 [OUTRO SILENCE] Padding Part {part_num} to preserve video closing outro/music.")
         trailing_canvas.export(str(part_path), format="wav")
         intermediate_files.append(part_path)
         del trailing_canvas
@@ -718,7 +726,6 @@ def assemble_master_audio(
         ]
         subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     else:
-        # Fallback Python chunked concatenation
         with sf.SoundFile(str(output_wav_path), mode="w", samplerate=SAMPLE_RATE, channels=1, subtype="PCM_16") as outfile:
             for p in intermediate_files:
                 with sf.SoundFile(str(p), mode="r") as infile:
@@ -733,98 +740,67 @@ def assemble_master_audio(
 
 
 # ==================================================================================================
-# 6. VIDEO MUXING (FFmpeg Stream Copy)
-# ==================================================================================================
-def mux_video_with_audio(video_input_path: str, audio_input_path: str, output_video_path: str) -> Optional[str]:
-    """Muxes the dubbed audio back into the original video without re-encoding the video stream."""
-    if not shutil.which("ffmpeg") or not os.path.exists(video_input_path):
-        return None
-
-    print(f"\n🎬 [MUXING] Muxing dubbed audio with video: {Path(video_input_path).name}...")
-    try:
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", video_input_path,
-            "-i", audio_input_path,
-            "-c:v", "copy",            # Copy video stream directly (instant)
-            "-c:a", "aac",             # AAC audio codec
-            "-b:a", "192k",
-            "-map", "0:v:0",           # Video from input 0
-            "-map", "1:a:0",           # Dubbed audio from input 1
-            "-shortest",
-            output_video_path,
-        ]
-        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        print(f"🎉 [VIDEO MUX COMPLETE] Final dubbed anime video saved to: {output_video_path}")
-        return output_video_path
-    except Exception as e:
-        print(f"⚠️ [MUX ERROR] Failed to mux video: {e}")
-        return None
-
-
-# ==================================================================================================
-# 7. MAIN END-TO-END PIPELINE CONTROLLER
+# 8. MASTER PIPELINE CONTROLLER
 # ==================================================================================================
 def run_narutogen_pipeline(
     srt_file: str,
     output_audio: str = "narutogen_dubbed_audio.wav",
-    video_file: Optional[str] = None,
-    output_video: Optional[str] = "narutogen_dubbed_video.mp4",
     hours: int = 0,
     minutes: int = 0,
     seconds: int = 0,
-    base_voice: str = "hi-IN-MadhurNeural",
+    target_language: str = "Hindi (Kokoro TTS)",
     rvc_model_path: Optional[str] = None,
     rvc_index_path: Optional[str] = None,
     pitch_shift: int = 0,
     progress_callback=None,
 ) -> Dict[str, Any]:
-    """Automates the entire SRT-to-Dubbed-Audio (and optional Video) workflow end-to-end."""
+    """Automates the entire SRT -> Kokoro-82M -> RVC -> Stitched Master Audio workflow."""
     pipeline_start = time.time()
 
-    # Step 0: Determine canvas duration
+    # Step 0: Total duration
     total_video_ms = ((hours * 3600) + (minutes * 60) + seconds) * 1000
-    if video_file and os.path.exists(video_file):
-        probed_ms = probe_video_duration(video_file)
-        if probed_ms and probed_ms > 0:
-            print(f"🎬 [AUTO CANVAS] Detected video duration: {probed_ms/1000:.1f}s ({probed_ms/1000/60:.2f} mins).")
-            total_video_ms = probed_ms
-
     if total_video_ms <= 0:
-        total_video_ms = 60000  # Fallback to at least 1 min
+        total_video_ms = 60000
 
-    # Workspace folders
+    # Staging folders
     work_dir = Path(tempfile.gettempdir()) / "narutogen_workspace"
-    tts_dir = work_dir / "step1_tts"
+    tts_dir = work_dir / "step1_kokoro"
     rvc_dir = work_dir / "step2_rvc"
     parts_dir = work_dir / "step3_parts"
 
     for d in [tts_dir, rvc_dir, parts_dir]:
         if d.exists():
-            shutil.rmtree(d)
+            shutil.rmtree(d, ignore_errors=True)
         d.mkdir(parents=True, exist_ok=True)
 
     if progress_callback:
-        progress_callback(0.02, desc="📄 Parsing SRT subtitle cues...")
+        progress_callback(0.02, desc="📄 Parsing SRT subtitles...")
 
     # Step 1: Parse SRT
     cues, adjusted_video_ms = parse_srt_file(srt_file, total_video_ms)
     if not cues:
-        raise ValueError("No valid subtitle cues found in SRT file.")
+        raise ValueError("No valid dialogue cues found in the uploaded SRT file.")
 
-    # Step 2: Ultra-fast TTS (Edge-TTS async)
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    cue_tts_pairs = loop.run_until_complete(
-        batch_generate_tts(cues, voice=base_voice, tts_output_dir=tts_dir, progress_callback=progress_callback)
+    # Resolve Kokoro voice and language
+    lang_info = TARGET_LANGUAGES.get(target_language, TARGET_LANGUAGES["Hindi (Kokoro TTS)"])
+    lang_code = lang_info["lang_code"]
+    voice = lang_info["voice"]
+
+    # Step 2: Kokoro-82M Local Neural TTS
+    cue_tts_pairs = batch_generate_kokoro_tts(
+        cues=cues,
+        lang_code=lang_code,
+        voice=voice,
+        tts_output_dir=tts_dir,
+        progress_callback=progress_callback,
     )
-    loop.close()
 
     # Step 3: RVC Voice Conversion
     converter = CharacterVoiceConverter(
         model_path=rvc_model_path,
         index_path=rvc_index_path,
         pitch_shift=pitch_shift,
+        model_url=CONFIGURED_RVC_MODEL_URL,
     )
     cue_rvc_pairs = converter.batch_convert(cue_tts_pairs, rvc_output_dir=rvc_dir, progress_callback=progress_callback)
 
@@ -838,22 +814,14 @@ def run_narutogen_pipeline(
         progress_callback=progress_callback,
     )
 
-    # Step 5: Optional Video Muxing
-    final_video = None
-    if video_file and os.path.exists(video_file) and output_video:
-        if progress_callback:
-            progress_callback(0.95, desc="🎬 Muxing dubbed audio with anime video (FFmpeg)...")
-        final_video = mux_video_with_audio(video_file, str(final_audio), str(Path(output_video).resolve()))
-
     if progress_callback:
-        progress_callback(1.0, desc="🏆 NarutoGen Pipeline Complete!")
+        progress_callback(1.0, desc="🏆 Dubbing Pipeline Complete!")
 
     total_time = time.time() - pipeline_start
     audio_info = sf.info(str(final_audio))
 
     return {
         "audio_path": str(final_audio),
-        "video_path": str(final_video) if final_video else None,
         "elapsed_seconds": total_time,
         "audio_duration_sec": audio_info.duration,
         "cues_count": len(cues),
@@ -862,11 +830,11 @@ def run_narutogen_pipeline(
 
 
 # ==================================================================================================
-# 8. MINIMAL & CLEAN GRADIO WEB UI INTERFACE
+# 9. MINIMAL & CLEAN GRADIO WEB UI INTERFACE
 # ==================================================================================================
 CUSTOM_CSS = """
 .gradio-container {
-    max-width: 860px !important;
+    max-width: 820px !important;
     margin: 0 auto !important;
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif !important;
 }
@@ -884,10 +852,10 @@ CUSTOM_CSS = """
 .naruto-title {
     font-size: 2.1rem;
     font-weight: 800;
-    background: linear-gradient(90deg, #ff8c00, #ff4500, #ffa500);
+    background: linear-gradient(90deg, #ff8c00 0%, #ff4500 100%);
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
-    margin-bottom: 4px;
+    margin-bottom: 6px;
 }
 
 .naruto-subtitle {
@@ -929,22 +897,23 @@ def gradio_dubbing_handler(
     minutes: float,
     seconds: float,
     target_language: str,
-    progress=gr.Progress(track_tqdm=True),
+    progress=None,
 ):
-    """Clean minimal handler connecting the UI to the NarutoGen pipeline."""
+    """Clean minimal handler connecting the UI to the pipeline."""
+    if progress is None and GRADIO_AVAILABLE and gr is not None:
+        try:
+            progress = gr.Progress(track_tqdm=True)
+        except Exception:
+            progress = None
     if srt_file_obj is None:
         return "### ⚠️ Please upload an SRT subtitle file (*.srt) to begin.", None
 
     srt_path = getattr(srt_file_obj, "name", str(srt_file_obj))
 
-    # Resolve Edge-TTS base voice from dropdown
-    base_voice = TARGET_LANGUAGES.get(target_language, "hi-IN-MadhurNeural")
-
-    # Staging paths
     out_dir = Path(tempfile.gettempdir()) / "narutogen_outputs"
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = int(time.time())
-    out_audio = str(out_dir / f"naruto_dubbed_{stamp}.wav")
+    out_audio = str(out_dir / f"master_dubbed_{stamp}.wav")
 
     try:
         results = run_narutogen_pipeline(
@@ -953,26 +922,26 @@ def gradio_dubbing_handler(
             hours=int(hours or 0),
             minutes=int(minutes or 0),
             seconds=int(seconds or 0),
-            base_voice=base_voice,
+            target_language=target_language,
             progress_callback=progress,
         )
 
         elapsed = results["elapsed_seconds"]
         dur = results["audio_duration_sec"]
-        rvc_status = "✅ Naruto RVC V2 (Active)" if results["rvc_active"] else "⚡ Baseline Neural TTS"
+        rvc_status = "✅ Active (RVC Character Model Loaded)" if results["rvc_active"] else "⚡ Kokoro Neural TTS Baseline"
 
         status_markdown = f"""
 ### 🎉 Dubbing Completed Successfully!
 
 | Metric | Result |
 | :--- | :--- |
-| **Language** | {target_language} (`{base_voice}`) |
-| **Voice Model** | {rvc_status} |
-| **Total Duration** | `{int(dur//60):02d}:{int(dur%60):02d}` ({dur:.2f}s) |
+| **Target Language** | {target_language} |
+| **Voice Conversion (RVC)** | {rvc_status} |
+| **Audio Duration** | `{int(dur//60):02d}:{int(dur%60):02d}` ({dur:.2f}s) |
 | **Dialogue Lines Processed** | {results["cues_count"]} cues |
 | **Total Processing Time** | **{elapsed:.1f}s** ({elapsed/60:.2f} mins) |
 
-*Listen to or download the master Naruto audio file below.*
+*Listen to or download your master dubbed audio file below.*
 """
         return status_markdown, results["audio_path"]
 
@@ -989,21 +958,27 @@ An error occurred during execution:
 
 
 def build_ui():
-    """Constructs the clean, minimal NarutoGen Gradio interface."""
+    """Constructs the clean, minimal Gradio interface (strictly 4 requested elements)."""
+    if not GRADIO_AVAILABLE or gr is None:
+        raise RuntimeError(
+            "Gradio is not installed in the environment.\n"
+            "Please run: pip install gradio"
+        )
+
     theme = gr.themes.Soft(
         primary_hue="orange",
         secondary_hue="slate",
         neutral_hue="slate",
     )
 
-    with gr.Blocks(theme=theme, css=CUSTOM_CSS, title="NarutoGen: AI Voice Dubbing") as demo:
+    with gr.Blocks(theme=theme, css=CUSTOM_CSS, title="AI Voice Dubbing Studio (Kokoro-82M + RVC)") as demo:
 
         gr.HTML(
             """
             <div class="naruto-header">
-                <div class="naruto-title">🍥 NarutoGen: AI Voice Dubbing</div>
+                <div class="naruto-title">🎙️ AI Voice Dubbing Studio</div>
                 <div class="naruto-subtitle">
-                    Automated High-Speed Anime Voice Dubbing • Microsoft Edge-TTS + Naruto RVC V2
+                    Kokoro-82M Neural TTS + RVC Voice Conversion • 100% Local & Free
                 </div>
             </div>
             """
@@ -1020,9 +995,9 @@ def build_ui():
             # 2. Language Selection Dropdown
             lang_dropdown = gr.Dropdown(
                 choices=list(TARGET_LANGUAGES.keys()),
-                value="Hindi (Madhur TTS)",
+                value="Hindi (Kokoro TTS)",
                 label="2. Target Dubbing Language",
-                info="Edge-TTS base neural voice will be synthesized and converted into Naruto's voice",
+                info="Generates base speech using local Kokoro-82M neural model",
             )
 
             # 3. Video Duration Inputs (Hours, Minutes, Seconds)
@@ -1050,7 +1025,7 @@ def build_ui():
             """
         )
         audio_player = gr.Audio(
-            label="Dubbed Naruto Master Audio (.wav)",
+            label="Master Dubbed Audio (.wav)",
             type="filepath",
             interactive=False,
         )
@@ -1074,20 +1049,28 @@ def build_ui():
     return demo
 
 
-# Alias exports for backwards-compatibility with app.py and external runners
+# Alias exports for backwards-compatibility
 run_pipeline = run_narutogen_pipeline
 DEFAULT_BATCH_SIZE = 10
 
+
 # ==================================================================================================
-# 9. PUBLIC LAUNCH (share=True FOR GOOGLE COLAB)
+# 10. PUBLIC LAUNCH & MODEL CONFIGURATION SPOT
 # ==================================================================================================
+# ⚙️ USER MODEL CONFIGURATION:
+# Paste your custom RVC model download link below (Hugging Face .zip containing .pth and .index files).
+# The pipeline will automatically download and extract it to models/character/ and weights/.
+CUSTOM_RVC_MODEL_DOWNLOAD_URL = (
+    "https://huggingface.co/ivaan2003/ai-rvc/resolve/main/CarryMinati%20-%20Ajey%20Nagar%20-%20Weights.gg%20Model.zip"
+)
+
 if __name__ == "__main__":
     demo = build_ui()
-    print("\n" + "=" * 65)
-    print("🚀 [NARUTOGEN] Launching Interactive Dubbing Interface...")
-    print("=" * 65 + "\n")
+    print("\n" + "=" * 70)
+    print("🚀 [DUBBING STUDIO] Launching Interactive Web Interface...")
+    print(f"🎙️ Configured RVC Model URL: {CUSTOM_RVC_MODEL_DOWNLOAD_URL}")
+    print("=" * 70 + "\n")
 
-    # MANDATORY: share=True generates a public gradio.live URL in Google Colab
     try:
         demo.queue().launch(
             share=True,
@@ -1096,7 +1079,6 @@ if __name__ == "__main__":
             show_error=True,
         )
     except OSError:
-        # Fallback if port 7860 is bound by a previous background session
         demo.queue().launch(
             share=True,
             server_name="0.0.0.0",

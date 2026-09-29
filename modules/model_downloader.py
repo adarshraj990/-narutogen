@@ -1,17 +1,12 @@
 """
 ====================================================================================================
-MODULE: NARUTO RVC MODEL DOWNLOADER & EXTRACTOR
+MODULE: RVC CHARACTER MODEL DOWNLOADER & EXTRACTOR
 ====================================================================================================
-Automatically fetches, verifies, and organizes the Naruto Uzumaki RVC V2 model weights and index file
-from Hugging Face into project and RVC-standard directory structures.
+Automatically fetches, verifies, and organizes RVC V2 model weights (.pth) and feature index (.index)
+files from Hugging Face into project and standard RVC directory structures.
 
-Model Source:
-https://huggingface.co/Mboisuper/Naruto_Uzumaki_315_Epochs/resolve/main/naruto-uzumaki.zip
-
-Directories Populated:
-1. models/naruto/   -> Project-standard model folder (naruto.pth, naruto.index)
-2. weights/         -> Standard RVC weights folder for .pth checkpoints
-3. logs/naruto/     -> Standard RVC feature index folder for .index files
+Default Model: CarryMinati (Ajey Nagar) Hindi RVC Model
+Source: https://huggingface.co/ivaan2003/ai-rvc/resolve/main/CarryMinati%20-%20Ajey%20Nagar%20-%20Weights.gg%20Model.zip
 ====================================================================================================
 """
 
@@ -31,18 +26,27 @@ if sys.platform.startswith("win"):
     except Exception:
         pass
 
-# Direct download link for Naruto Uzumaki RVC V2 model (.pth + .index)
-DEFAULT_NARUTO_MODEL_URL = (
-    "https://huggingface.co/Mboisuper/Naruto_Uzumaki_315_Epochs/resolve/main/naruto-uzumaki.zip"
+# Default RVC character model download link (CarryMinati / Ajey Nagar Hindi voice model)
+DEFAULT_CHARACTER_MODEL_URL = (
+    "https://huggingface.co/ivaan2003/ai-rvc/resolve/main/CarryMinati%20-%20Ajey%20Nagar%20-%20Weights.gg%20Model.zip"
 )
+DEFAULT_NARUTO_MODEL_URL = DEFAULT_CHARACTER_MODEL_URL
 
-# Canonical filenames
-PTH_CANONICAL_NAME = "naruto.pth"
-INDEX_CANONICAL_NAME = "naruto.index"
+# Canonical filenames for unified project referencing
+PTH_CANONICAL_NAME = "character.pth"
+INDEX_CANONICAL_NAME = "character.index"
+
+
+def normalize_huggingface_url(url: str) -> str:
+    """Normalizes Hugging Face URLs by converting /blob/ to /resolve/ for direct downloading."""
+    url = url.strip()
+    if "huggingface.co" in url and "/blob/" in url:
+        url = url.replace("/blob/", "/resolve/")
+    return url
 
 
 def _format_bytes(bytes_count: int) -> str:
-    """Format bytes to human readable string (KB, MB, GB)."""
+    """Format bytes to human-readable string (KB, MB, GB)."""
     if bytes_count < 1024:
         return f"{bytes_count} B"
     elif bytes_count < 1024 * 1024:
@@ -58,11 +62,12 @@ def download_file_with_progress(url: str, output_path: Path, chunk_size: int = 1
     Downloads a remote file with a live console progress bar and download stats.
     Works with standard Python library (no external dependencies required).
     """
+    url = normalize_huggingface_url(url)
     output_path = Path(output_path).resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temp_download_path = output_path.with_suffix(output_path.suffix + ".downloading")
 
-    print(f"\n🌐 [DOWNLOAD] Fetching archive from Hugging Face:")
+    print(f"\n🌐 [DOWNLOAD] Fetching RVC archive from:")
     print(f"   🔗 URL: {url}")
     print(f"   📁 Destination: {output_path.name}")
 
@@ -77,7 +82,7 @@ def download_file_with_progress(url: str, output_path: Path, chunk_size: int = 1
 
     start_time = time.time()
     try:
-        with urllib.request.urlopen(req, timeout=60) as response, open(temp_download_path, "wb") as out_file:
+        with urllib.request.urlopen(req, timeout=90) as response, open(temp_download_path, "wb") as out_file:
             content_length = response.headers.get("Content-Length")
             total_size = int(content_length) if content_length and content_length.isdigit() else 0
             downloaded = 0
@@ -90,13 +95,12 @@ def download_file_with_progress(url: str, output_path: Path, chunk_size: int = 1
                 out_file.write(chunk)
                 downloaded += len(chunk)
 
-                # Update progress roughly every 0.15s or 1MB
                 now = time.time()
                 if now - last_print >= 0.15 or (total_size and downloaded >= total_size):
                     elapsed = max(0.001, now - start_time)
                     speed = downloaded / elapsed
                     speed_str = f"{_format_bytes(int(speed))}/s"
-                    
+
                     if total_size > 0:
                         pct = (downloaded / total_size) * 100
                         bar_len = 30
@@ -110,48 +114,41 @@ def download_file_with_progress(url: str, output_path: Path, chunk_size: int = 1
                     sys.stdout.flush()
                     last_print = now
 
-            print()
+            sys.stdout.write("\n")
 
-        # Atomic rename on completion
-        if temp_download_path.exists():
-            if output_path.exists():
-                output_path.unlink()
-            temp_download_path.rename(output_path)
+        # Rename to final file atomically
+        if output_path.exists():
+            output_path.unlink()
+        temp_download_path.rename(output_path)
 
-        total_time = time.time() - start_time
-        print(f"✅ [DOWNLOAD COMPLETE] {_format_bytes(output_path.stat().st_size)} in {total_time:.1f}s.\n")
+        total_time = max(0.001, time.time() - start_time)
+        print(f"✅ [DOWNLOAD COMPLETE] Saved {output_path.name} ({_format_bytes(output_path.stat().st_size)}) in {total_time:.1f}s.")
         return output_path
 
     except Exception as e:
         if temp_download_path.exists():
-            try:
-                temp_download_path.unlink()
-            except Exception:
-                pass
-        raise RuntimeError(f"Failed to download model weights from {url}: {e}") from e
+            temp_download_path.unlink()
+        print(f"❌ [DOWNLOAD FAILED] Error downloading {url}: {e}")
+        raise
 
 
-def extract_rvc_zip(zip_path: Path, extract_dir: Path) -> Tuple[Optional[Path], Optional[Path]]:
-    """
-    Extracts a zip file and identifies .pth and .index files inside.
-    Handles archives with arbitrary internal folder nesting.
-    """
-    extract_dir = Path(extract_dir).resolve()
-    extract_dir.mkdir(parents=True, exist_ok=True)
+def extract_rvc_zip(zip_path: Path, extract_to: Path) -> Tuple[Optional[Path], Optional[Path]]:
+    """Extracts zip archive and discovers the largest .pth and .index files."""
+    extract_to = Path(extract_to).resolve()
+    extract_to.mkdir(parents=True, exist_ok=True)
 
-    print(f"📦 [EXTRACT] Unpacking {zip_path.name} into {extract_dir}...")
-    with zipfile.ZipFile(zip_path, "r") as zip_ref:
-        zip_ref.extractall(extract_dir)
+    print(f"\n📦 [EXTRACT] Unpacking archive: {zip_path.name}...")
+    with zipfile.ZipFile(zip_path, "r") as z:
+        z.extractall(extract_to)
 
     pth_file: Optional[Path] = None
     index_file: Optional[Path] = None
 
-    # Search recursively for .pth and .index
-    for p in extract_dir.rglob("*.pth"):
+    for p in extract_to.rglob("*.pth"):
         if not pth_file or p.stat().st_size > pth_file.stat().st_size:
             pth_file = p
 
-    for p in extract_dir.rglob("*.index"):
+    for p in extract_to.rglob("*.index"):
         if not index_file or p.stat().st_size > index_file.stat().st_size:
             index_file = p
 
@@ -168,19 +165,14 @@ def extract_rvc_zip(zip_path: Path, extract_dir: Path) -> Tuple[Optional[Path], 
     return pth_file, index_file
 
 
-def setup_naruto_model_directories(
+def setup_model_directories(
     discovered_pth: Path,
     discovered_index: Optional[Path],
     models_dir: Path,
     weights_dir: Path,
     logs_dir: Path,
 ) -> Dict[str, str]:
-    """
-    Distributes model and index files to both project paths and standard RVC locations:
-    1. models/naruto/ (naruto.pth, naruto.index, and original names)
-    2. weights/ (standard RVC weights folder)
-    3. logs/naruto/ (standard RVC feature index folder)
-    """
+    """Organizes model and index files into project paths and standard RVC locations."""
     models_dir = Path(models_dir).resolve()
     weights_dir = Path(weights_dir).resolve()
     logs_dir = Path(logs_dir).resolve()
@@ -194,7 +186,6 @@ def setup_naruto_model_directories(
     if discovered_pth.resolve() != primary_pth.resolve():
         shutil.copy2(discovered_pth, primary_pth)
 
-    # Copy with original name to models_dir if different
     orig_pth_dest = models_dir / discovered_pth.name
     if orig_pth_dest.resolve() != discovered_pth.resolve() and orig_pth_dest.resolve() != primary_pth.resolve():
         shutil.copy2(discovered_pth, orig_pth_dest)
@@ -217,7 +208,6 @@ def setup_naruto_model_directories(
         if orig_index_dest.resolve() != discovered_index.resolve() and orig_index_dest.resolve() != primary_index.resolve():
             shutil.copy2(discovered_index, orig_index_dest)
 
-        # Copy to RVC standard logs/naruto/ folder
         rvc_logs_index = logs_dir / discovered_index.name
         shutil.copy2(discovered_index, rvc_logs_index)
         rvc_canonical_index = logs_dir / INDEX_CANONICAL_NAME
@@ -233,7 +223,7 @@ def setup_naruto_model_directories(
     }
 
     print("\n" + "=" * 65)
-    print("🍥 [NARUTO RVC SETUP COMPLETE] Directory Structure Ready:")
+    print("🎙️ [RVC MODEL SETUP COMPLETE] Directory Structure Ready:")
     print(f"   📁 Primary Weights: {result['model_path']}")
     print(f"   📑 Feature Index:   {result['index_path'] or 'None'}")
     print(f"   🗂️ RVC weights/ :   {result['weights_path']}")
@@ -243,27 +233,17 @@ def setup_naruto_model_directories(
     return result
 
 
-def ensure_naruto_model(
-    url: str = DEFAULT_NARUTO_MODEL_URL,
+def ensure_character_model(
+    url: str = DEFAULT_CHARACTER_MODEL_URL,
     project_root: Optional[str] = None,
     force: bool = False,
 ) -> Dict[str, str]:
-    """
-    High-level entrypoint: Checks if Naruto model already exists locally.
-    If not (or if force=True), downloads the zip archive and configures directories.
-
-    Args:
-        url: HuggingFace zip download URL.
-        project_root: Root directory of the repository (defaults to current working directory).
-        force: If True, re-downloads even if files already exist.
-
-    Returns:
-        Dict containing model_path, index_path, weights_path, logs_path, models_dir.
-    """
+    """High-level entrypoint: Checks if character model exists locally or downloads it."""
+    url = normalize_huggingface_url(url)
     root = Path(project_root).resolve() if project_root else Path.cwd().resolve()
-    models_dir = root / "models" / "naruto"
+    models_dir = root / "models" / "character"
     weights_dir = root / "weights"
-    logs_dir = root / "logs" / "naruto"
+    logs_dir = root / "logs" / "character"
 
     primary_pth = models_dir / PTH_CANONICAL_NAME
     primary_index = models_dir / INDEX_CANONICAL_NAME
@@ -271,24 +251,29 @@ def ensure_naruto_model(
     # Check for existing valid files across candidates
     pth_candidates = [
         primary_pth,
-        models_dir / "naruto-uzumaki-by-mboisuper.pth",
+        root / "models" / "naruto" / "naruto.pth",
+        root / "models" / "naruto" / "naruto-uzumaki-by-mboisuper.pth",
         weights_dir / "naruto-uzumaki-by-mboisuper.pth",
-        weights_dir / PTH_CANONICAL_NAME,
+        weights_dir / "character.pth",
     ]
+    # Add any .pth in weights or models
+    pth_candidates.extend(list(weights_dir.glob("*.pth")))
+    pth_candidates.extend(list((root / "models").rglob("*.pth")))
+
     index_candidates = [
         primary_index,
-        models_dir / "added_IVF102_Flat_nprobe_1_naruto-uzumaki-by-mboisuper_v2.index",
-        logs_dir / "added_IVF102_Flat_nprobe_1_naruto-uzumaki-by-mboisuper_v2.index",
-        logs_dir / INDEX_CANONICAL_NAME,
+        root / "models" / "naruto" / "naruto.index",
+        logs_dir / "character.index",
     ]
+    index_candidates.extend(list(logs_dir.glob("*.index")))
+    index_candidates.extend(list((root / "models").rglob("*.index")))
 
     existing_pth = next((p for p in pth_candidates if p.exists() and p.stat().st_size > 10_000_000), None)
-    existing_index = next((p for p in index_candidates if p.exists() and p.stat().st_size > 1_000_000), None)
+    existing_index = next((p for p in index_candidates if p.exists() and p.stat().st_size > 500_000), None)
 
     if not force and existing_pth:
-        print(f"🍥 [NARUTO MODEL] Naruto RVC model already exists locally: {existing_pth.name}")
-        # Ensure directories are in sync
-        return setup_naruto_model_directories(
+        print(f"🎙️ [RVC MODEL] Model already exists locally: {existing_pth.name}")
+        return setup_model_directories(
             discovered_pth=existing_pth,
             discovered_index=existing_index,
             models_dir=models_dir,
@@ -297,14 +282,13 @@ def ensure_naruto_model(
         )
 
     # Download archive
-    zip_dest = root / "inputs" / "naruto-uzumaki.zip"
+    zip_dest = root / "inputs" / "rvc_model.zip"
     zip_dest.parent.mkdir(parents=True, exist_ok=True)
 
-    print("🍥 [NARUTO MODEL] Starting automatic download and setup...")
+    print(f"🎙️ [RVC MODEL] Starting automatic download from: {url}")
     downloaded_zip = download_file_with_progress(url, zip_dest)
 
-    # Temporary extraction folder
-    temp_extract = root / "inputs" / "temp_naruto_extract"
+    temp_extract = root / "inputs" / "temp_rvc_extract"
     if temp_extract.exists():
         shutil.rmtree(temp_extract, ignore_errors=True)
     temp_extract.mkdir(parents=True, exist_ok=True)
@@ -314,8 +298,7 @@ def ensure_naruto_model(
         if not discovered_pth:
             raise FileNotFoundError("Could not find any .pth model weights in downloaded archive.")
 
-        # Organize into final destinations
-        model_paths = setup_naruto_model_directories(
+        model_paths = setup_model_directories(
             discovered_pth=discovered_pth,
             discovered_index=discovered_index,
             models_dir=models_dir,
@@ -323,7 +306,6 @@ def ensure_naruto_model(
             logs_dir=logs_dir,
         )
 
-        # Cleanup temporary files
         try:
             shutil.rmtree(temp_extract, ignore_errors=True)
             if downloaded_zip.exists():
@@ -334,16 +316,25 @@ def ensure_naruto_model(
         return model_paths
 
     except Exception as e:
-        print(f"❌ [SETUP ERROR] Failed setting up Naruto model: {e}")
+        print(f"❌ [SETUP ERROR] Failed setting up RVC model: {e}")
         raise
+
+
+def ensure_naruto_model(
+    url: str = DEFAULT_CHARACTER_MODEL_URL,
+    project_root: Optional[str] = None,
+    force: bool = False,
+) -> Dict[str, str]:
+    """Backwards-compatibility alias."""
+    return ensure_character_model(url=url, project_root=project_root, force=force)
 
 
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Download and setup Naruto RVC V2 model weights and index.")
-    parser.add_argument("--url", type=str, default=DEFAULT_NARUTO_MODEL_URL, help="Hugging Face zip URL")
+    parser = argparse.ArgumentParser(description="Download and setup RVC model weights and index.")
+    parser.add_argument("--url", type=str, default=DEFAULT_CHARACTER_MODEL_URL, help="Hugging Face zip URL")
     parser.add_argument("--force", action="store_true", help="Force re-download even if already present")
     args = parser.parse_args()
 
-    ensure_naruto_model(url=args.url, force=args.force)
+    ensure_character_model(url=args.url, force=args.force)
