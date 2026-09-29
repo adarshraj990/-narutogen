@@ -30,11 +30,49 @@ import soundfile as sf
 from .tts_generator import SubtitleCue
 from .model_downloader import ensure_naruto_model, PTH_CANONICAL_NAME, INDEX_CANONICAL_NAME
 
+# --------------------------------------------------------------------------------------------------
+# Patch TensorBoard / TensorFlow compatibility shim for FairSeq & RVC
+# --------------------------------------------------------------------------------------------------
+def _patch_tensorboard_for_fairseq():
+    """
+    Prevents `ImportError: cannot import name 'notf' from 'tensorboard.compat'`
+    which occurs in Python 3.13 / Ubuntu 24.04 Colab when fairseq imports torch.utils.tensorboard.
+    Neither FairSeq Hubert extraction nor RVC inference uses TensorBoard.
+    """
+    import sys
+    from unittest.mock import MagicMock
+
+    try:
+        import tensorboard.compat
+        if not hasattr(tensorboard.compat, "notf"):
+            tensorboard.compat.notf = MagicMock()
+    except Exception:
+        pass
+
+    for mod in [
+        "torch.utils.tensorboard",
+        "torch.utils.tensorboard.writer",
+        "torch.utils.tensorboard._embedding",
+        "tensorboard",
+        "tensorboard.compat",
+        "tensorboard.compat.tf",
+        "tensorboard.lazy",
+    ]:
+        if mod not in sys.modules:
+            mock_mod = MagicMock()
+            mock_mod.SummaryWriter = MagicMock
+            mock_mod.FileWriter = MagicMock
+            sys.modules[mod] = mock_mod
+
+_patch_tensorboard_for_fairseq()
+
 # Try importing RVC Inference libraries
 try:
     from rvc_python.infer import RVCInference, infer_file
     RVC_AVAILABLE = True
-except ImportError:
+except Exception as _rvc_err:
+    RVCInference = None
+    infer_file = None
     RVC_AVAILABLE = False
 
 try:
