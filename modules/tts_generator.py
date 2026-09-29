@@ -55,25 +55,50 @@ except ImportError:
 # ==================================================================================================
 SUPPORTED_VOICES = {
     # Hindi (Primary target for Naruto Hindi dubbing)
-    "hi_madhur": "hi-IN-MadhurNeural",     # Male (Deep, clear, heroic - ideal for Naruto/Male Anime)
-    "hi_swara": "hi-IN-SwaraNeural",       # Female (Expressive, natural - female characters/young Naruto)
+    "hi_madhur": "hi-IN-MadhurNeural",       # Male (Deep, clear, heroic - ideal for Naruto/Male Anime)
+    "hi_swara": "hi-IN-SwaraNeural",         # Female (Expressive, natural - female characters/young Naruto)
+    "hindi": "hi-IN-MadhurNeural",
+    "hi": "hi-IN-MadhurNeural",
     # Spanish
-    "es_alvaro": "es-ES-AlvaroNeural",     # Spanish Spain Male
-    "es_jorge": "es-MX-JorgeNeural",       # Spanish Mexico Male
-    "es_elvira": "es-ES-ElviraNeural",     # Spanish Spain Female
+    "es_alvaro": "es-ES-AlvaroNeural",       # Spanish Spain Male
+    "es_jorge": "es-MX-JorgeNeural",         # Spanish Mexico Male
+    "es_elvira": "es-ES-ElviraNeural",       # Spanish Spain Female
+    "spanish": "es-ES-AlvaroNeural",
+    "es": "es-ES-AlvaroNeural",
     # French
-    "fr_henri": "fr-FR-HenriNeural",       # French Male
-    "fr_denise": "fr-FR-DeniseNeural",     # French Female
+    "fr_henri": "fr-FR-HenriNeural",         # French Male
+    "fr_denise": "fr-FR-DeniseNeural",       # French Female
+    "french": "fr-FR-HenriNeural",
+    "fr": "fr-FR-HenriNeural",
+    # Portuguese (Brazil & Portugal)
+    "pt_antonio": "pt-BR-AntonioNeural",     # Brazilian Portuguese Male (Expressive, clear)
+    "pt_francisca": "pt-BR-FranciscaNeural", # Brazilian Portuguese Female
+    "pt_duarte": "pt-PT-DuarteNeural",       # Portugal Portuguese Male
+    "portuguese": "pt-BR-AntonioNeural",
+    "pt": "pt-BR-AntonioNeural",
+    "pt-br": "pt-BR-AntonioNeural",
     # English
-    "en_guy": "en-US-GuyNeural",           # US Male
-    "en_prabhat": "en-IN-PrabhatNeural",   # Indian English Male
-    "en_neerja": "en-IN-NeerjaNeural",     # Indian English Female
+    "en_guy": "en-US-GuyNeural",             # US Male
+    "en_prabhat": "en-IN-PrabhatNeural",     # Indian English Male
+    "en_neerja": "en-IN-NeerjaNeural",       # Indian English Female
+    "english": "en-US-GuyNeural",
+    "en": "en-US-GuyNeural",
     # Japanese (Reference)
-    "ja_keita": "ja-JP-KeitaNeural",       # Japanese Male
+    "ja_keita": "ja-JP-KeitaNeural",         # Japanese Male
+    "japanese": "ja-JP-KeitaNeural",
+    "ja": "ja-JP-KeitaNeural",
 }
 
 DEFAULT_VOICE = "hi-IN-MadhurNeural"
 SAMPLE_RATE = 44100
+
+
+def resolve_voice_name(voice_input: Optional[str]) -> str:
+    """Resolves short voice names, language codes, or full Azure neural voice names."""
+    if not voice_input:
+        return DEFAULT_VOICE
+    cleaned = str(voice_input).strip()
+    return SUPPORTED_VOICES.get(cleaned.lower(), SUPPORTED_VOICES.get(cleaned, cleaned))
 
 
 # ==================================================================================================

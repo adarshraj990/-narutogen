@@ -28,6 +28,7 @@ if sys.platform.startswith("win"):
 
 import soundfile as sf
 from .tts_generator import SubtitleCue
+from .model_downloader import ensure_naruto_model, PTH_CANONICAL_NAME, INDEX_CANONICAL_NAME
 
 # Try importing RVC Inference libraries
 try:
@@ -43,10 +44,35 @@ except ImportError:
     TORCH_AVAILABLE = False
 
 
+def find_default_naruto_model() -> Tuple[Optional[str], Optional[str]]:
+    """
+    Locates existing Naruto RVC model and index across project and standard RVC paths.
+    Returns (model_path, index_path) or (None, None).
+    """
+    root = Path.cwd().resolve()
+    pth_candidates = [
+        root / "models" / "naruto" / PTH_CANONICAL_NAME,
+        root / "models" / "naruto" / "naruto-uzumaki-by-mboisuper.pth",
+        root / "weights" / "naruto-uzumaki-by-mboisuper.pth",
+        root / "weights" / PTH_CANONICAL_NAME,
+    ]
+    index_candidates = [
+        root / "models" / "naruto" / INDEX_CANONICAL_NAME,
+        root / "models" / "naruto" / "added_IVF102_Flat_nprobe_1_naruto-uzumaki-by-mboisuper_v2.index",
+        root / "logs" / "naruto" / "added_IVF102_Flat_nprobe_1_naruto-uzumaki-by-mboisuper_v2.index",
+        root / "logs" / "naruto" / INDEX_CANONICAL_NAME,
+    ]
+
+    found_pth = next((str(p) for p in pth_candidates if p.exists() and p.stat().st_size > 10_000_000), None)
+    found_index = next((str(p) for p in index_candidates if p.exists() and p.stat().st_size > 1_000_000), None)
+    return found_pth, found_index
+
+
 class RVCBatchConverter:
     """
     RVC Batch Voice Conversion Engine.
     Loads Naruto or target character voice model once and processes audio chunks in batches.
+    Supports auto-downloading and automatic feature index location.
     """
 
     def __init__(
@@ -60,13 +86,14 @@ class RVCBatchConverter:
         filter_radius: int = 3,
         resample_sr: int = 44100,
         device: Optional[str] = None,
+        auto_download: bool = True,
     ):
         """
         Initialize RVC Engine.
 
         Args:
-            model_path: Path to the character .pth file (e.g., 'models/naruto/naruto.pth').
-            index_path: Path to the feature .index file (e.g., 'models/naruto/naruto.index').
+            model_path: Path to the character .pth file. If None or not found, auto-resolves/downloads.
+            index_path: Path to the feature .index file. If None, auto-searches known folders.
             pitch_shift: Semitone pitch shift (0 for normal, +12 for octave up, -12 down).
             f0_method: Pitch extraction algorithm ('rmvpe', 'pm', 'harvest', 'crepe').
             index_rate: Strength of character timbre retrieval (0.0 to 1.0, default 0.75).
@@ -74,9 +101,8 @@ class RVCBatchConverter:
             filter_radius: Median filter radius for pitch recognition (default 3).
             resample_sr: Target sample rate (default 44100 Hz).
             device: 'cuda:0' or 'cpu'. Automatically chooses cuda if available.
+            auto_download: Whether to automatically download Naruto weights if missing.
         """
-        self.model_path = model_path
-        self.index_path = index_path
         self.pitch_shift = int(pitch_shift)
         self.f0_method = f0_method
         self.index_rate = float(index_rate)
@@ -96,8 +122,54 @@ class RVCBatchConverter:
         self.engine = None
         self._is_ready = False
 
-        if model_path:
-            self.load_model(model_path, index_path)
+        # Resolve model and index paths
+        resolved_pth, resolved_index = self._resolve_model_files(model_path, index_path, auto_download)
+        self.model_path = resolved_pth
+        self.index_path = resolved_index
+
+        if self.model_path and os.path.exists(self.model_path):
+            self.load_model(self.model_path, self.index_path)
+
+    def _resolve_model_files(
+        self,
+        model_path: Optional[str],
+        index_path: Optional[str],
+        auto_download: bool,
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """Resolves existing or downloaded model and index paths."""
+        resolved_pth = model_path
+        resolved_index = index_path
+
+        # If model_path is not specified or doesn't exist, search local candidates
+        if not resolved_pth or not os.path.exists(resolved_pth):
+            found_pth, found_idx = find_default_naruto_model()
+            if found_pth:
+                resolved_pth = found_pth
+                if not resolved_index:
+                    resolved_index = found_idx
+            elif auto_download:
+                print("🍥 [RVC ENGINE] Model weights not found locally. Initiating auto-download...")
+                download_res = ensure_naruto_model()
+                resolved_pth = download_res.get("model_path")
+                if not resolved_index:
+                    resolved_index = download_res.get("index_path")
+
+        # If index_path was still not found, search adjacent or standard directories
+        if resolved_pth and (not resolved_index or not os.path.exists(resolved_index)):
+            p = Path(resolved_pth)
+            # Check adjacent .index files
+            adjacent_indices = list(p.parent.glob("*.index"))
+            if adjacent_indices:
+                resolved_index = str(adjacent_indices[0])
+            else:
+                # Check standard logs/naruto/
+                logs_dir = Path.cwd() / "logs" / "naruto"
+                if logs_dir.exists():
+                    log_indices = list(logs_dir.glob("*.index"))
+                    if log_indices:
+                        resolved_index = str(log_indices[0])
+
+        return resolved_pth, resolved_index
 
     def load_model(self, model_path: str, index_path: Optional[str] = None):
         """Loads RVC weights onto the selected device."""
@@ -110,16 +182,17 @@ class RVCBatchConverter:
         print("\n" + "=" * 65)
         print("🍥 [RVC ENGINE] Loading Target Character Voice Model...")
         print(f"📦 Model File:  {Path(model_path).name}")
-        print(f"📑 Index File:  {Path(index_path).name if index_path else 'None (auto-search/none)'}")
+        print(f"📑 Index File:  {Path(index_path).name if index_path and os.path.exists(index_path) else 'None (auto-search/none)'}")
         print(f"⚡ Device:      {self.device} (RMVPE Pitch Extraction)")
         print(f"🎵 Pitch Shift: {self.pitch_shift:+d} semitones | Index Rate: {self.index_rate}")
         print("=" * 65)
 
         if not RVC_AVAILABLE:
             print(
-                "⚠️ [RVC WARNING] 'rvc-python' is not installed in the environment.\n"
-                "Install it via: pip install rvc-python\n"
-                "Falling back to baseline audio pass-through."
+                "⚠️ [RVC NOTICE] 'rvc-python' is not installed in the local environment.\n"
+                "   For GPU inference on Google Colab or local Nvidia GPU, install:\n"
+                "       !pip install rvc-python\n"
+                "   Operating in baseline audio verification mode (passthrough)."
             )
             self._is_ready = False
             return
@@ -133,7 +206,7 @@ class RVCBatchConverter:
 
         except Exception as e:
             print(f"⚠️ [RVC LOAD ERROR] Failed to load RVC engine: {e}")
-            print("Falling back to baseline audio pass-through.")
+            print("Operating in baseline audio verification mode.")
             self.engine = None
             self._is_ready = False
 
@@ -265,3 +338,127 @@ def run_rvc_conversion(
         return converter.convert_batch(file_list, output_dir=output_dir, progress_callback=progress_callback)
 
     return converter.convert_batch(input_items, output_dir=output_dir, progress_callback=progress_callback)
+
+
+def convert_base_audio_to_naruto(
+    audio_inputs: Union[List[str], str, List[Path]],
+    output_dir: str = "./outputs/naruto_rvc",
+    pitch_shift: int = 0,
+    f0_method: str = "rmvpe",
+    model_path: Optional[str] = None,
+    index_path: Optional[str] = None,
+    progress_callback=None,
+) -> List[str]:
+    """
+    Convenience function: Takes base audio files (generated by Edge-TTS for Hindi, Spanish,
+    French, Portuguese, etc.) and converts their timbre into Naruto's voice using the loaded model.
+    Outputs the final converted .wav files into the designated output folder.
+
+    Args:
+        audio_inputs: Path to a single .wav, directory containing .wav files, or a list of .wav paths.
+        output_dir: Output folder destination for converted Naruto audio files.
+        pitch_shift: Semitones transposition (0=natural, +12=octave up).
+        f0_method: Pitch extraction algorithm ('rmvpe' default).
+        model_path: Optional custom .pth path. If None, auto-resolves/downloads Naruto V2.
+        index_path: Optional custom .index path. If None, auto-locates feature index.
+        progress_callback: Optional progress reporter callback.
+
+    Returns:
+        List of generated Naruto .wav file paths.
+    """
+    out_dir = Path(output_dir).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Resolve inputs
+    if isinstance(audio_inputs, (str, Path)):
+        p = Path(audio_inputs).resolve()
+        if p.is_dir():
+            file_list = sorted([str(f) for f in p.glob("*.wav")])
+        elif p.is_file():
+            file_list = [str(p)]
+        else:
+            raise FileNotFoundError(f"Input audio path not found: {audio_inputs}")
+    else:
+        file_list = [str(Path(f).resolve()) for f in audio_inputs]
+
+    if not file_list:
+        print(f"⚠️ [NARUTO RVC] No WAV audio files found to convert in: {audio_inputs}")
+        return []
+
+    print("\n" + "=" * 65)
+    print(f"🍥 [NARUTO RVC BATCH] Converting {len(file_list)} base audio files to Naruto voice...")
+    print(f"📁 Output Folder: {out_dir}")
+    print("=" * 65)
+
+    converter = RVCBatchConverter(
+        model_path=model_path,
+        index_path=index_path,
+        pitch_shift=pitch_shift,
+        f0_method=f0_method,
+        auto_download=True,
+    )
+
+    converted_paths = converter.convert_batch(
+        cues_or_files=file_list,
+        output_dir=str(out_dir),
+        progress_callback=progress_callback,
+    )
+
+    return converted_paths
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Naruto RVC V2 Batch Voice Converter (Hindi, Spanish, French, Portuguese, etc.)"
+    )
+    parser.add_argument(
+        "--input", "-i",
+        type=str,
+        required=True,
+        help="Input WAV file or directory containing base audio WAVs",
+    )
+    parser.add_argument(
+        "--output-dir", "-o",
+        type=str,
+        default="./outputs/naruto_rvc",
+        help="Designated folder for final converted .wav files",
+    )
+    parser.add_argument(
+        "--model", "-m",
+        type=str,
+        default=None,
+        help="Path to Naruto .pth file (auto-downloads if omitted/not found)",
+    )
+    parser.add_argument(
+        "--index",
+        type=str,
+        default=None,
+        help="Path to Naruto .index file (auto-discovered if omitted)",
+    )
+    parser.add_argument(
+        "--pitch", "-p",
+        type=int,
+        default=0,
+        help="Pitch transpose in semitones (0 for natural, +12 for octave up)",
+    )
+    parser.add_argument(
+        "--f0-method",
+        type=str,
+        default="rmvpe",
+        choices=["rmvpe", "pm", "harvest", "crepe"],
+        help="Pitch extraction algorithm (RMVPE recommended)",
+    )
+
+    args = parser.parse_args()
+
+    results = convert_base_audio_to_naruto(
+        audio_inputs=args.input,
+        output_dir=args.output_dir,
+        pitch_shift=args.pitch,
+        f0_method=args.f0_method,
+        model_path=args.model,
+        index_path=args.index,
+    )
+    print(f"\n🎉 Successfully processed {len(results)} files into '{args.output_dir}'!")

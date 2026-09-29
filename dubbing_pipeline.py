@@ -65,10 +65,13 @@ SAMPLE_RATE = 44100          # High-fidelity sample rate for RVC output
 FLUSH_INTERVAL_MINUTES = 15  # 15-minute slice window for memory safety
 FLUSH_INTERVAL_MS = FLUSH_INTERVAL_MINUTES * 60 * 1000  # 900,000 ms
 
-# Recommended Hindi base voices for Edge-TTS
+# Recommended base voices for Edge-TTS (Hindi, Spanish, French, Portuguese, English)
 DEFAULT_VOICES = {
     "Hindi Male (Madhur - Ideal for Naruto/Male Anime)": "hi-IN-MadhurNeural",
     "Hindi Female (Swara - Female Characters/Young Naruto)": "hi-IN-SwaraNeural",
+    "Spanish Male (Alvaro - Spain / Latin Dub)": "es-ES-AlvaroNeural",
+    "French Male (Henri - European French Dub)": "fr-FR-HenriNeural",
+    "Portuguese Male (Antonio - Brazilian Portuguese Dub)": "pt-BR-AntonioNeural",
     "Indian English Male (Prabhat - Hinglish)": "en-IN-PrabhatNeural",
     "Indian English Female (Neerja - Hinglish)": "en-IN-NeerjaNeural",
 }
@@ -253,10 +256,28 @@ class CharacterVoiceConverter:
         self.protect = protect
         self.engine = None
 
-        if model_path and os.path.exists(model_path):
+        # Auto-detect Naruto model if not explicitly specified
+        if not self.model_path or not os.path.exists(self.model_path):
+            candidates = [
+                Path("models/naruto/naruto.pth"),
+                Path("weights/naruto.pth"),
+                Path("weights/naruto-uzumaki-by-mboisuper.pth"),
+            ]
+            for cand in candidates:
+                if cand.exists():
+                    self.model_path = str(cand.resolve())
+                    if not self.index_path:
+                        idx_cand = cand.with_suffix(".index")
+                        if idx_cand.exists():
+                            self.index_path = str(idx_cand.resolve())
+                        elif Path("models/naruto/naruto.index").exists():
+                            self.index_path = str(Path("models/naruto/naruto.index").resolve())
+                    break
+
+        if self.model_path and os.path.exists(self.model_path):
             self._init_rvc_engine()
         else:
-            print("💡 [RVC] No .pth model provided. Running in High-Speed Base TTS Mode.")
+            print("💡 [RVC] No .pth model found. Running in High-Speed Base TTS Mode.")
 
     def _init_rvc_engine(self):
         """Initializes the RVC engine."""

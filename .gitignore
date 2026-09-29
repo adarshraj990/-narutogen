@@ -8,6 +8,7 @@ outputs/
 *.index
 intermediate_parts/
 concat_list.txt
+*.zip
 .ipynb_checkpoints/
 .env
 .venv/

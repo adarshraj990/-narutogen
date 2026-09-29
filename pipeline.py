@@ -24,7 +24,7 @@ if sys.platform.startswith("win"):
     except Exception:
         pass
 
-from modules.tts_generator import generate_base_speech, DEFAULT_VOICE, SUPPORTED_VOICES
+from modules.tts_generator import generate_base_speech, DEFAULT_VOICE, SUPPORTED_VOICES, resolve_voice_name
 from modules.rvc_converter import run_rvc_conversion
 from modules.audio_stitcher import stitch_audio_chunks
 
@@ -47,12 +47,13 @@ def run_narutogen_pipeline(
     Input (.srt / .txt) -> Base TTS (.wav) -> RVC Naruto (.wav) -> Stitched Master (.wav)
     """
     pipeline_start = time.time()
+    resolved_voice = resolve_voice_name(base_voice)
     print("\n" + "=" * 70)
     print("NARUTOGEN AUTOMATED AUDIO DUBBING PIPELINE")
     print("=" * 70)
     print(f"Input File:        {input_file}")
-    print(f"Base Neural Voice: {base_voice}")
-    print(f"Character Model:   {model_path if model_path and os.path.exists(model_path) else 'Base TTS Mode (No .pth)'}")
+    print(f"Base Neural Voice: {resolved_voice}")
+    print(f"Character Model:   {model_path if model_path and os.path.exists(model_path) else 'Auto-detecting Naruto RVC Model'}")
     print(f"Pitch Transpose:   {pitch_shift:+d} semitones | Algorithm: {f0_method}")
     print(f"Master Audio Dest: {output_master_wav}")
     print("=" * 70 + "\n")
@@ -66,7 +67,7 @@ def run_narutogen_pipeline(
     cues = generate_base_speech(
         input_source=input_file,
         output_dir="./outputs/temp_base_tts",
-        voice=base_voice,
+        voice=resolved_voice,
         concurrency=10,
         progress_callback=progress_callback,
     )
@@ -75,19 +76,16 @@ def run_narutogen_pipeline(
 
     # Step 2: RVC Character Voice Conversion
     t2 = time.time()
-    if model_path and os.path.exists(model_path):
-        print("[PHASE 2/3] Transforming Timbre to Naruto via RVC (RMVPE)...")
-        cues = run_rvc_conversion(
-            input_items=cues,
-            model_path=model_path,
-            index_path=index_path,
-            output_dir="./outputs/temp_rvc_converted",
-            pitch_shift=pitch_shift,
-            f0_method=f0_method,
-            progress_callback=progress_callback,
-        )
-    else:
-        print("[PHASE 2/3] Skipping RVC (Model .pth not provided). Using Baseline Hindi Audio.")
+    print("[PHASE 2/3] Transforming Timbre to Naruto via RVC (RMVPE)...")
+    cues = run_rvc_conversion(
+        input_items=cues,
+        model_path=model_path,
+        index_path=index_path,
+        output_dir="./outputs/temp_rvc_converted",
+        pitch_shift=pitch_shift,
+        f0_method=f0_method,
+        progress_callback=progress_callback,
+    )
     t3 = time.time()
     print(f"Phase 2 Complete in {t3 - t2:.2f} seconds.\n")
 
