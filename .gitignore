@@ -3,6 +3,9 @@ __pycache__/
 *$py.class
 *.wav
 *.mp3
+outputs/
+*.pth
+*.index
 intermediate_parts/
 concat_list.txt
 .ipynb_checkpoints/

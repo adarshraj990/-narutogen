@@ -1,48 +1,91 @@
-# 🍥 NarutoGen: High-Efficiency AI Anime Dubbing Pipeline
-### Two-Step Architecture (Lightweight Neural TTS + RVC Voice Conversion)
-Optimized for Google Colab Free Tier (T4 GPU, 16GB RAM) | 2-Hour Video Dubbed in **10–15 Minutes** (Zero OOM Crashes)
+# 🍥 NarutoGen: Automated Local & Colab AI Audio Conversion Pipeline
+### High-Speed Anime Voice Conversion (Edge-TTS + RVC RMVPE + Precision Stitching)
+Optimized for Anti-Gravity IDE & Google Colab Free Tier (T4 GPU, 16GB RAM) | 100% Free, NO Paid APIs, Zero OOM Crashes.
 
 ---
 
-## 🚀 Why This Architecture?
+## 📁 Project Directory Structure
 
-| Approach | 2-Hour Execution Time | Memory / Stability | Verdict |
-| :--- | :--- | :--- | :--- |
-| **Heavy Diffusion / Flow-Matching (e.g. IndicF5)** | > 70–90 Minutes ❌ | Constant Colab 12GB OOM Crashes ❌ | **Rejected** |
-| **NarutoGen Two-Step (Edge-TTS + RVC RMVPE)** | **10–15 Minutes** ⚡ | Zero OOM (Under 2GB RAM & 3GB VRAM) ✅ | **Adopted ✅** |
-
-1. **Step 1 (Ultra-Fast Synthesis):** Asynchronous Microsoft Edge Neural TTS generates standard Hindi/Hinglish baseline audio for all 1,200+ subtitles in **~1–2 minutes** (CPU-based async network calls, 0 GPU compute).
-2. **Step 2 (Character Voice Conversion):** RVC (Retrieval-based Voice Conversion) with **RMVPE pitch extraction** transforms the speech into the target character's voice (e.g. Naruto) using pre-trained `.pth` and `.index` files in **~8–12 minutes** on T4 GPU.
-3. **Step 3 (Lip-Sync & Muxing):** Phase-vocoder time-stretching aligns dialogue to exact SRT timestamps, composites the master track with 15-minute RAM safety flushes, and instantly muxes with the original video via `ffmpeg`.
-
----
-
-## ⚡ Colab Quick Start
-
-In a fresh Google Colab notebook cell:
-
-```bash
-# 1. Reset directory and clone NarutoGen
-%cd /content
-!rm -rf narutogen -narutogen
-!git clone https://github.com/adarshraj990/-narutogen.git narutogen
-%cd /content/narutogen
-
-# 2. Install dependencies & FFmpeg
-!pip install -q gradio edge-tts rvc-python pysrt pydub librosa soundfile psutil
-!apt-get install -y ffmpeg
-
-# 3. Launch Web App (with public gradio.live link)
-!python dubbing_pipeline.py
+```text
+NARUTOGEN/
+├── models/                     # Character RVC V2 weights (.pth & .index)
+│   └── naruto/
+│       ├── README.md           # Instructions on placing Naruto RVC weights
+│       ├── naruto.pth          # (Place pre-downloaded Naruto weights here)
+│       └── naruto.index        # (Place pre-downloaded feature index here)
+├── modules/                    # Clean, modular processing components
+│   ├── __init__.py             # Module package exports
+│   ├── tts_generator.py        # Module 1: Edge-TTS synthesis (SRT & plain text)
+│   ├── rvc_converter.py        # Module 2: RVC batch voice conversion (RMVPE)
+│   └── audio_stitcher.py       # Module 3: Time-sync, canvas assembly & FFmpeg stitching
+├── inputs/                     # Input scripts & subtitle files
+│   └── sample_hindi_english.srt
+├── outputs/                    # Exported continuous master audio (.wav)
+│   └── .gitkeep
+├── pipeline.py                 # Automated master CLI pipeline runner
+├── dubbing_pipeline.py         # Full Gradio Web UI application (gr.Blocks + share=True)
+└── requirements.txt            # Python dependencies
 ```
 
 ---
 
-## 🎨 Web Interface Features (`gr.Blocks`)
+## 🧩 Modular Components Breakdown
 
-- **Subtitles Input:** Upload translated `.srt` files.
-- **Video Input (Optional):** Upload raw anime video (`.mp4`, `.mkv`) for instant automatic video muxing.
-- **RVC Character Voice:** Upload your character's `.pth` weights and optional `.index` feature file.
-- **Pitch Transpose:** Fine-tune character pitch with the `-12` to `+12` semitone slider.
-- **Dual Output:** Real-time audio player (`.wav`) + full dubbed video player (`.mp4`).
-- **Public Share Link:** `demo.launch(share=True)` provides a remote web URL for Colab.
+### 1. Module 1: TTS Generation (`modules/tts_generator.py`)
+- **Technology:** Microsoft `edge-tts` (asynchronous websocket synthesis).
+- **Zero API Keys:** 100% free, runs without account setup or billing.
+- **Speed:** Synthesizes ~1,200 dialogue lines in **1–2 minutes** using async concurrency (`asyncio.Semaphore`).
+- **Multi-Language Voices:**
+  - Hindi Male: `hi-IN-MadhurNeural` (heroic, clear, assertive — ideal base for Naruto)
+  - Hindi Female: `hi-IN-SwaraNeural` (female characters / young Naruto)
+  - Spanish: `es-ES-AlvaroNeural`, `es-MX-JorgeNeural`
+  - French: `fr-FR-HenriNeural`
+  - English / Hinglish: `en-US-GuyNeural`, `en-IN-PrabhatNeural`
+- **Output:** Clean 44.1kHz 16-bit PCM `.wav` chunks.
+
+### 2. Module 2: RVC Voice Conversion (`modules/rvc_converter.py`)
+- **Technology:** Retrieval-based Voice Conversion (RVC V2).
+- **Pitch Algorithm:** `rmvpe` (RMVPE provides superior polyphonic pitch estimation, eliminating metallic/robotic artifacts).
+- **Persistent GPU Cache:** Loads model onto GPU memory strictly once, processing all dialogue chunks in batches without re-initializing the neural net.
+- **Parameters:**
+  - `pitch_shift` (`f0_up_key`): `-12` to `+12` semitones.
+  - `index_rate`: `0.75` (retrieval feature strength).
+  - `protect`: `0.33` (protects unvoiced consonants).
+
+### 3. Module 3: Audio Stitching & Synchronization (`modules/audio_stitcher.py`)
+- **Pitch-Preserving Time-Stretch:** Uses `librosa` phase-vocoder (or `pydub` cross-splice) to automatically speed up dialogue chunks that exceed their subtitle timestamp window without altering pitch.
+- **Silence Padding:** Automatically pads shorter lines with silence so dialogue stays in exact lip-sync.
+- **15-Minute RAM Flushing:** Slices and exports audio in 15-minute segments to disk, purging memory variables (`gc.collect()`) so 2-hour audio never crashes Colab's 12GB RAM.
+- **Zero-RAM Concatenation:** Merges all 15-minute segments into the final master `.wav` file via FFmpeg stream copy (or low-memory Python chunk streaming).
+
+---
+
+## ⚡ Quick Start
+
+### 1. Installation
+```bash
+pip install -r requirements.txt
+# On Linux / Colab:
+apt-get install -y ffmpeg
+```
+
+### 2. Run Master CLI Pipeline
+```bash
+# Basic run with sample SRT:
+python pipeline.py --input inputs/sample_hindi_english.srt --output outputs/naruto_master.wav
+
+# Run with custom Naruto RVC model:
+python pipeline.py \
+  --input inputs/sample_hindi_english.srt \
+  --model models/naruto/naruto.pth \
+  --index models/naruto/naruto.index \
+  --voice hi_madhur \
+  --pitch 0 \
+  --output outputs/naruto_master.wav
+```
+
+### 3. Run Gradio Web UI (with Colab share=True public link)
+```bash
+python dubbing_pipeline.py
+```
+Open the generated `https://xxxx.gradio.live` link in any browser to drag-and-drop SRT files, select character models, and monitor real-time progress.
