@@ -452,7 +452,16 @@ class CharacterVoiceConverter:
                 print("⚠️ [RVC NOTICE] CUDA unavailable, running RVC on CPU.")
 
             self.engine = RVCInference(device=device)
-            self.engine.load_model(self.model_path)
+            self.engine.load_model(self.model_path, index_path=self.index_path or "", version="v2")
+            if hasattr(self.engine, "set_params"):
+                self.engine.set_params(
+                    f0method=self.f0_method,
+                    f0up_key=self.pitch_shift,
+                    index_rate=self.index_rate,
+                    protect=self.protect,
+                    filter_radius=self.filter_radius,
+                    resample_sr=self.resample_sr,
+                )
             print(f"✅ [STEP 2: RVC] RVC Model Loaded on {device} with RMVPE pitch extraction! {get_memory_stats()}")
         except Exception as e:
             print(f"⚠️ [RVC LOAD ERROR] Could not load RVC engine: {e}. Falling back to baseline TTS.")
@@ -466,16 +475,23 @@ class CharacterVoiceConverter:
             return True
 
         try:
-            # Execute RMVPE voice conversion
-            self.engine.infer_file(
-                input_path=str(input_wav),
-                output_path=str(output_wav),
-                pitch_shift=self.pitch_shift,
-                f0_method=self.f0_method,
-                index_path=self.index_path if (self.index_path and os.path.exists(self.index_path)) else "",
-                index_rate=self.index_rate,
-                protect=self.protect,
-            )
+            if hasattr(self.engine, "set_params"):
+                self.engine.set_params(
+                    f0method=self.f0_method,
+                    f0up_key=self.pitch_shift,
+                    index_rate=self.index_rate,
+                    protect=self.protect,
+                )
+            # RVCInference in rvc-python expects infer_file(input_path, output_path)
+            try:
+                self.engine.infer_file(str(input_wav), str(output_wav))
+            except TypeError:
+                self.engine.infer_file(
+                    input_path=str(input_wav),
+                    output_path=str(output_wav),
+                    pitch=self.pitch_shift,
+                    f0method=self.f0_method,
+                )
             return True
         except Exception as e:
             print(f"⚠️ [RVC CONVERT ERROR] {input_wav.name}: {e}. Retaining baseline audio.")
@@ -1053,15 +1069,31 @@ def build_ui():
     return demo
 
 
+# Alias exports for backwards-compatibility with app.py and external runners
+run_pipeline = run_narutogen_pipeline
+DEFAULT_BATCH_SIZE = 10
+
 # ==================================================================================================
 # 9. PUBLIC LAUNCH (share=True FOR GOOGLE COLAB)
 # ==================================================================================================
 if __name__ == "__main__":
     demo = build_ui()
+    print("\n" + "=" * 65)
+    print("🚀 [NARUTOGEN] Launching Interactive Dubbing Interface...")
+    print("=" * 65 + "\n")
+
     # MANDATORY: share=True generates a public gradio.live URL in Google Colab
-    demo.launch(
-        share=True,
-        server_name="0.0.0.0",
-        server_port=7860,
-        debug=True,
-    )
+    try:
+        demo.queue().launch(
+            share=True,
+            server_name="0.0.0.0",
+            server_port=7860,
+            show_error=True,
+        )
+    except OSError:
+        # Fallback if port 7860 is bound by a previous background session
+        demo.queue().launch(
+            share=True,
+            server_name="0.0.0.0",
+            show_error=True,
+        )

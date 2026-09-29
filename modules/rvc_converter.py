@@ -245,7 +245,16 @@ class RVCBatchConverter:
         try:
             # Instantiate persistent RVC Inference engine
             self.engine = RVCInference(device=self.device)
-            self.engine.load_model(self.model_path)
+            self.engine.load_model(self.model_path, index_path=self.index_path or "", version="v2")
+            if hasattr(self.engine, "set_params"):
+                self.engine.set_params(
+                    f0method=self.f0_method,
+                    f0up_key=self.pitch_shift,
+                    index_rate=self.index_rate,
+                    protect=self.protect,
+                    filter_radius=self.filter_radius,
+                    resample_sr=self.resample_sr,
+                )
             self._is_ready = True
             print("✅ [RVC ENGINE] Model loaded successfully into memory!\n")
 
@@ -263,16 +272,22 @@ class RVCBatchConverter:
             return True
 
         try:
-            resolved_index = self.index_path if (self.index_path and os.path.exists(self.index_path)) else ""
-            self.engine.infer_file(
-                input_path=str(input_wav),
-                output_path=str(output_wav),
-                pitch_shift=self.pitch_shift,
-                f0_method=self.f0_method,
-                index_path=resolved_index,
-                index_rate=self.index_rate,
-                protect=self.protect,
-            )
+            if hasattr(self.engine, "set_params"):
+                self.engine.set_params(
+                    f0method=self.f0_method,
+                    f0up_key=self.pitch_shift,
+                    index_rate=self.index_rate,
+                    protect=self.protect,
+                )
+            try:
+                self.engine.infer_file(str(input_wav), str(output_wav))
+            except TypeError:
+                self.engine.infer_file(
+                    input_path=str(input_wav),
+                    output_path=str(output_wav),
+                    pitch=self.pitch_shift,
+                    f0method=self.f0_method,
+                )
             return True
         except Exception as e:
             print(f"⚠️ [RVC CONVERSION ERROR] Failed for {Path(input_wav).name}: {e}")
