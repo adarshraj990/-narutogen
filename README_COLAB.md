@@ -26,7 +26,8 @@ if not os.path.exists('/content/narutogen'):
 ```bash
 !apt-get update -qq && apt-get install -y ffmpeg
 !pip install -q -r requirements.txt
-!pip install -q rvc-python
+!pip install -q fairseq-fixed pyworld-fixed torchcrepe faiss-cpu
+!pip install -q --no-deps rvc-python
 ```
 
 ---
