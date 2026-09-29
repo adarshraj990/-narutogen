@@ -25,6 +25,7 @@ if not os.path.exists('/content/narutogen'):
 ### Cell 2: Install Dependencies & RVC GPU Support
 ```bash
 !apt-get update -qq && apt-get install -y ffmpeg
+!pip install -q "numpy<2.0.0" av ffmpeg-python loguru praat-parselmouth
 !pip install -q -r requirements.txt
 !pip install -q fairseq-fixed pyworld-fixed torchcrepe faiss-cpu
 !pip install -q --no-deps rvc-python

@@ -370,6 +370,7 @@ class CharacterVoiceConverter:
                 print("⚡ [RVC AUTO-INSTALL] 'rvc-python' not detected. Installing pre-built wheels...")
                 subprocess.check_call([
                     sys.executable, "-m", "pip", "install", "-q",
+                    "numpy<2.0.0", "av", "ffmpeg-python", "loguru", "praat-parselmouth",
                     "fairseq-fixed", "pyworld-fixed", "torchcrepe", "faiss-cpu"
                 ])
                 subprocess.check_call([

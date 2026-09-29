@@ -3,11 +3,17 @@ pysrt>=1.1.2
 pydub>=0.25.1
 soundfile>=0.12.1
 librosa>=0.10.1
-numpy>=1.24.0
+numpy<2.0.0,>=1.24.0
 
 # Free Neural TTS (No API keys needed)
 edge-tts>=6.1.10
 nest-asyncio>=1.6.0
+
+# RVC Runtime Dependencies
+av>=11.0.0
+ffmpeg-python>=0.2.0
+loguru>=0.7.0
+praat-parselmouth>=0.4.2
 
 # System Monitoring & PyTorch Utilities
 psutil>=5.9.0
