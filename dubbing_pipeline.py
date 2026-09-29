@@ -370,6 +370,8 @@ class CharacterVoiceConverter:
         f0_method: str = "rmvpe",
         index_rate: float = 0.75,
         protect: float = 0.33,
+        filter_radius: int = 3,
+        resample_sr: int = 0,
     ):
         self.model_path = model_path
         self.index_path = index_path
@@ -377,6 +379,8 @@ class CharacterVoiceConverter:
         self.f0_method = f0_method
         self.index_rate = index_rate
         self.protect = protect
+        self.filter_radius = filter_radius
+        self.resample_sr = resample_sr
         self.engine = None
 
         # Auto-detect Naruto model if not explicitly specified
@@ -460,8 +464,8 @@ class CharacterVoiceConverter:
                     f0up_key=self.pitch_shift,
                     index_rate=self.index_rate,
                     protect=self.protect,
-                    filter_radius=self.filter_radius,
-                    resample_sr=self.resample_sr,
+                    filter_radius=getattr(self, "filter_radius", 3),
+                    resample_sr=getattr(self, "resample_sr", 0),
                 )
             print(f"✅ [STEP 2: RVC] RVC Model Loaded on {device} with RMVPE pitch extraction! {get_memory_stats()}")
         except Exception as e:
