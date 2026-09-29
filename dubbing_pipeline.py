@@ -33,9 +33,16 @@ from typing import List, Tuple, Dict, Any, Optional
 
 import numpy as np
 import soundfile as sf
-import librosa
 from pydub import AudioSegment
 import gradio as gr
+
+# Try importing librosa with graceful fallback
+try:
+    import librosa
+    LIBROSA_AVAILABLE = True
+except ImportError:
+    librosa = None
+    LIBROSA_AVAILABLE = False
 
 # Try importing pysrt with graceful fallback
 try:
@@ -72,15 +79,12 @@ SAMPLE_RATE = 44100          # High-fidelity sample rate for RVC output
 FLUSH_INTERVAL_MINUTES = 15  # 15-minute slice window for memory safety
 FLUSH_INTERVAL_MS = FLUSH_INTERVAL_MINUTES * 60 * 1000  # 900,000 ms
 
-# Recommended base voices for Edge-TTS (Hindi, Spanish, French, Portuguese, English)
-DEFAULT_VOICES = {
-    "Hindi Male (Madhur - Ideal for Naruto/Male Anime)": "hi-IN-MadhurNeural",
-    "Hindi Female (Swara - Female Characters/Young Naruto)": "hi-IN-SwaraNeural",
-    "Spanish Male (Alvaro - Spain / Latin Dub)": "es-ES-AlvaroNeural",
-    "French Male (Henri - European French Dub)": "fr-FR-HenriNeural",
-    "Portuguese Male (Antonio - Brazilian Portuguese Dub)": "pt-BR-AntonioNeural",
-    "Indian English Male (Prabhat - Hinglish)": "en-IN-PrabhatNeural",
-    "Indian English Female (Neerja - Hinglish)": "en-IN-NeerjaNeural",
+# Target Dubbing Languages (Edge-TTS Base Neural Voices)
+TARGET_LANGUAGES = {
+    "Hindi (Madhur TTS)": "hi-IN-MadhurNeural",
+    "Spanish": "es-ES-AlvaroNeural",
+    "French": "fr-FR-HenriNeural",
+    "Portuguese": "pt-BR-AntonioNeural",
 }
 
 
@@ -314,12 +318,21 @@ class CharacterVoiceConverter:
                             self.index_path = str(idx_cand.resolve())
                         elif Path("models/naruto/naruto.index").exists():
                             self.index_path = str(Path("models/naruto/naruto.index").resolve())
-                    break
+            # If still not found, automatically download and set up Naruto model
+            if not self.model_path or not os.path.exists(self.model_path):
+                try:
+                    from modules.model_downloader import ensure_naruto_model
+                    print("🍥 [RVC BACKEND] Naruto model not found locally. Automatically downloading...")
+                    m_info = ensure_naruto_model()
+                    self.model_path = m_info.get("model_path")
+                    self.index_path = m_info.get("index_path")
+                except Exception as e:
+                    print(f"💡 [RVC AUTO-SETUP] Could not download Naruto model: {e}")
 
         if self.model_path and os.path.exists(self.model_path):
             self._init_rvc_engine()
         else:
-            print("💡 [RVC] No .pth model found. Running in High-Speed Base TTS Mode.")
+            print("💡 [RVC] Running in High-Speed Base TTS Mode.")
 
     def _init_rvc_engine(self):
         """Initializes the RVC engine."""
@@ -412,13 +425,24 @@ def time_sync_audio_file(audio_path: Path, target_dur_ms: int) -> AudioSegment:
     - If generated < target: Silence padding to match exact timestamp.
     """
     try:
-        y, sr = librosa.load(str(audio_path), sr=SAMPLE_RATE, mono=True)
+        if LIBROSA_AVAILABLE and librosa:
+            y, sr = librosa.load(str(audio_path), sr=SAMPLE_RATE, mono=True)
+        else:
+            y, sr = sf.read(str(audio_path), dtype="float32")
+            if y.ndim > 1:
+                y = np.mean(y, axis=1)
+
         actual_dur_ms = int(len(y) / sr * 1000)
 
         if actual_dur_ms > target_dur_ms:
             speed_ratio = actual_dur_ms / target_dur_ms
             capped_ratio = min(speed_ratio, 1.8)  # Cap speedup to avoid unnatural rush
-            stretched = librosa.effects.time_stretch(y, rate=capped_ratio)
+            if LIBROSA_AVAILABLE and librosa:
+                stretched = librosa.effects.time_stretch(y, rate=capped_ratio)
+            else:
+                new_len = int(len(y) / capped_ratio)
+                stretched = np.interp(np.linspace(0, len(y), new_len), np.arange(len(y)), y)
+
             stretched_int16 = (np.clip(stretched, -1.0, 1.0) * 32767).astype(np.int16)
             seg = AudioSegment(
                 data=stretched_int16.tobytes(),
@@ -714,79 +738,62 @@ def run_narutogen_pipeline(
 
 
 # ==================================================================================================
-# 8. GRADIO WEB UI INTERFACE
+# 8. MINIMAL & CLEAN GRADIO WEB UI INTERFACE
 # ==================================================================================================
 CUSTOM_CSS = """
 .gradio-container {
-    max-width: 1200px !important;
-    margin: auto !important;
+    max-width: 860px !important;
+    margin: 0 auto !important;
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif !important;
 }
 
 .naruto-header {
     text-align: center;
-    padding: 28px 20px;
-    background: linear-gradient(135deg, #1f1d36 0%, #17152b 50%, #0c0a1a 100%);
+    padding: 24px 20px;
+    background: linear-gradient(135deg, #181824 0%, #101018 100%);
     border-radius: 16px;
-    border: 1px solid rgba(255, 140, 0, 0.3);
-    margin-bottom: 24px;
-    box-shadow: 0 8px 32px 0 rgba(255, 100, 0, 0.15);
+    border: 1px solid rgba(255, 140, 0, 0.25);
+    margin-bottom: 22px;
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
 }
 
 .naruto-title {
-    font-size: 2.3rem;
+    font-size: 2.1rem;
     font-weight: 800;
     background: linear-gradient(90deg, #ff8c00, #ff4500, #ffa500);
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
-    margin-bottom: 6px;
+    margin-bottom: 4px;
 }
 
 .naruto-subtitle {
-    font-size: 1.05rem;
-    color: #e2e8f0;
-    margin-bottom: 14px;
+    font-size: 0.95rem;
+    color: #94a3b8;
 }
 
-.badge-row {
-    display: flex;
-    justify-content: center;
-    gap: 10px;
-    flex-wrap: wrap;
-}
-
-.badge {
-    background: rgba(255, 140, 0, 0.15);
-    border: 1px solid rgba(255, 140, 0, 0.4);
-    padding: 5px 14px;
-    border-radius: 20px;
-    font-size: 0.82rem;
-    color: #ffeedd;
-    font-weight: 600;
-}
-
-.btn-naruto {
+.btn-start {
     background: linear-gradient(135deg, #ff8c00 0%, #ff4500 100%) !important;
     border: none !important;
     color: white !important;
     font-weight: 700 !important;
     font-size: 1.15rem !important;
-    padding: 14px 28px !important;
+    padding: 14px 24px !important;
     border-radius: 12px !important;
-    box-shadow: 0 4px 20px rgba(255, 69, 0, 0.45) !important;
-    transition: all 0.3s ease !important;
+    box-shadow: 0 4px 18px rgba(255, 69, 0, 0.35) !important;
+    cursor: pointer !important;
+    transition: transform 0.2s ease, box-shadow 0.2s ease !important;
 }
 
-.btn-naruto:hover {
+.btn-start:hover {
     transform: translateY(-2px) !important;
-    box-shadow: 0 6px 25px rgba(255, 69, 0, 0.65) !important;
+    box-shadow: 0 6px 24px rgba(255, 69, 0, 0.55) !important;
 }
 
 .status-card {
     padding: 16px;
     border-radius: 12px;
-    border-left: 5px solid #ff8c00;
-    background: rgba(255, 140, 0, 0.08);
+    background: rgba(255, 140, 0, 0.05);
+    border: 1px solid rgba(255, 140, 0, 0.2);
     color: #e2e8f0;
 }
 """
@@ -794,67 +801,56 @@ CUSTOM_CSS = """
 
 def gradio_dubbing_handler(
     srt_file_obj,
-    video_file_obj,
     hours: float,
     minutes: float,
     seconds: float,
-    base_voice: str,
-    rvc_pth_obj,
-    rvc_index_obj,
-    pitch_shift: int,
+    target_language: str,
     progress=gr.Progress(track_tqdm=True),
 ):
-    """Binds the Gradio UI to the NarutoGen pipeline."""
+    """Clean minimal handler connecting the UI to the NarutoGen pipeline."""
     if srt_file_obj is None:
-        return "### ❌ Error: Please upload an SRT subtitle file.", None, None
+        return "### ⚠️ Please upload an SRT subtitle file (*.srt) to begin.", None
 
     srt_path = getattr(srt_file_obj, "name", str(srt_file_obj))
-    video_path = getattr(video_file_obj, "name", str(video_file_obj)) if video_file_obj else None
-    pth_path = getattr(rvc_pth_obj, "name", str(rvc_pth_obj)) if rvc_pth_obj else None
-    index_path = getattr(rvc_index_obj, "name", str(rvc_index_obj)) if rvc_index_obj else None
+
+    # Resolve Edge-TTS base voice from dropdown
+    base_voice = TARGET_LANGUAGES.get(target_language, "hi-IN-MadhurNeural")
 
     # Staging paths
     out_dir = Path(tempfile.gettempdir()) / "narutogen_outputs"
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = int(time.time())
-    out_audio = str(out_dir / f"dubbed_{stamp}.wav")
-    out_video = str(out_dir / f"dubbed_{stamp}.mp4") if video_path else None
+    out_audio = str(out_dir / f"naruto_dubbed_{stamp}.wav")
 
     try:
         results = run_narutogen_pipeline(
             srt_file=srt_path,
             output_audio=out_audio,
-            video_file=video_path,
-            output_video=out_video,
             hours=int(hours or 0),
             minutes=int(minutes or 0),
             seconds=int(seconds or 0),
             base_voice=base_voice,
-            rvc_model_path=pth_path,
-            rvc_index_path=index_path,
-            pitch_shift=int(pitch_shift),
             progress_callback=progress,
         )
 
         elapsed = results["elapsed_seconds"]
         dur = results["audio_duration_sec"]
-        rvc_status = "✅ Active (Naruto Character Voice)" if results["rvc_active"] else "⚡ Baseline TTS (Fast Mode)"
+        rvc_status = "✅ Naruto RVC V2 (Active)" if results["rvc_active"] else "⚡ Baseline Neural TTS"
 
         status_markdown = f"""
-### 🎉 NarutoGen Dubbing Completed!
+### 🎉 Dubbing Completed Successfully!
 
 | Metric | Result |
 | :--- | :--- |
+| **Language** | {target_language} (`{base_voice}`) |
+| **Voice Model** | {rvc_status} |
+| **Total Duration** | `{int(dur//60):02d}:{int(dur%60):02d}` ({dur:.2f}s) |
+| **Dialogue Lines Processed** | {results["cues_count"]} cues |
 | **Total Processing Time** | **{elapsed:.1f}s** ({elapsed/60:.2f} mins) |
-| **Dialogue Cues Processed** | {results["cues_count"]} lines |
-| **Final Master Audio Duration** | `{int(dur//60):02d}:{int(dur%60):02d}` ({dur:.2f}s) |
-| **Voice Conversion Engine** | {rvc_status} |
-| **Pitch Shift (f0_up_key)** | {pitch_shift:+d} semitones |
-| **Video Muxing** | {"✅ Video Dubbed Successfully" if results["video_path"] else "Not provided (Audio only)"} |
 
-*Listen to the master audio or watch the dubbed anime video below.*
+*Listen to or download the master Naruto audio file below.*
 """
-        return status_markdown, results["audio_path"], results["video_path"]
+        return status_markdown, results["audio_path"]
 
     except Exception as e:
         err_msg = f"""
@@ -863,152 +859,91 @@ An error occurred during execution:
 ```text
 {str(e)}
 ```
-*Tip: Ensure your Google Colab runtime is set to **T4 GPU**.*
+*Tip: Ensure your SRT file contains valid timestamps and dialogue.*
 """
-        return err_msg, None, None
+        return err_msg, None
 
 
 def build_ui():
-    """Constructs the sleek NarutoGen Gradio interface."""
+    """Constructs the clean, minimal NarutoGen Gradio interface."""
     theme = gr.themes.Soft(
         primary_hue="orange",
         secondary_hue="slate",
         neutral_hue="slate",
     )
 
-    with gr.Blocks(theme=theme, css=CUSTOM_CSS, title="NarutoGen Anime Dubbing Studio") as demo:
+    with gr.Blocks(theme=theme, css=CUSTOM_CSS, title="NarutoGen: AI Voice Dubbing") as demo:
 
         gr.HTML(
             """
             <div class="naruto-header">
-                <div class="naruto-title">🍥 NarutoGen: AI Anime Dubbing Studio</div>
+                <div class="naruto-title">🍥 NarutoGen: AI Voice Dubbing</div>
                 <div class="naruto-subtitle">
-                    High-Efficiency Two-Step Dubbing Pipeline: Lightweight Neural TTS + RVC Voice Conversion
-                </div>
-                <div class="badge-row">
-                    <span class="badge">⚡ Edge-TTS Async (10x Faster)</span>
-                    <span class="badge">🎙️ RVC + RMVPE Pitch Extraction</span>
-                    <span class="badge">🛡️ Zero Colab OOM Crashes</span>
-                    <span class="badge">🎬 Full Video Muxing</span>
+                    Automated High-Speed Anime Voice Dubbing • Microsoft Edge-TTS + Naruto RVC V2
                 </div>
             </div>
             """
         )
 
-        with gr.Row():
-            # LEFT COLUMN: Inputs
-            with gr.Column(scale=5):
-                gr.Markdown("### 📥 1. Upload Subtitles & Media")
+        with gr.Group():
+            # 1. File Upload (Single .srt file)
+            srt_input = gr.File(
+                label="1. Translated SRT Subtitles (*.srt)",
+                file_types=[".srt"],
+                file_count="single",
+            )
 
-                srt_input = gr.File(
-                    label="Translated SRT Subtitles (*.srt)",
-                    file_types=[".srt"],
-                    file_count="single",
-                )
+            # 2. Language Selection Dropdown
+            lang_dropdown = gr.Dropdown(
+                choices=list(TARGET_LANGUAGES.keys()),
+                value="Hindi (Madhur TTS)",
+                label="2. Target Dubbing Language",
+                info="Edge-TTS base neural voice will be synthesized and converted into Naruto's voice",
+            )
 
-                video_input = gr.File(
-                    label="Optional: Anime Video (*.mp4, *.mkv)",
-                    file_types=[".mp4", ".mkv", ".avi", ".mov"],
-                    file_count="single",
-                )
+            # 3. Video Duration Inputs (Hours, Minutes, Seconds)
+            gr.Markdown("#### 3. Video Duration (Timeline Canvas Setup)")
+            with gr.Row():
+                h_input = gr.Number(label="Hours", value=0, precision=0, minimum=0)
+                m_input = gr.Number(label="Minutes", value=0, precision=0, minimum=0)
+                s_input = gr.Number(label="Seconds", value=48, precision=0, minimum=0)
 
-                gr.Markdown("#### 🎬 Total Video Duration (Manual Canvas Setup)")
-                gr.Markdown(
-                    "<small style='color: #a0aec0;'>If video is not uploaded, set duration here to preserve outros/BGM.</small>"
-                )
-                with gr.Row():
-                    h_input = gr.Number(label="Hours", value=0, precision=0)
-                    m_input = gr.Number(label="Minutes", value=0, precision=0)
-                    s_input = gr.Number(label="Seconds", value=48, precision=0)
+            # 4. Action Button
+            start_btn = gr.Button(
+                "⚡ Start Dubbing",
+                variant="primary",
+                size="lg",
+                elem_classes="btn-start",
+            )
 
-                with gr.Accordion("🍥 Character Voice (RVC) & TTS Settings", open=True):
-                    voice_dropdown = gr.Dropdown(
-                        choices=list(DEFAULT_VOICES.items()),
-                        value="hi-IN-MadhurNeural",
-                        label="Step 1: Baseline Neural TTS Voice",
-                        info="Generates clear phonetic baseline speech before character voice conversion",
-                    )
-
-                    pth_input = gr.File(
-                        label="Step 2: RVC Character Model (*.pth)",
-                        file_types=[".pth"],
-                        file_count="single",
-                    )
-
-                    index_input = gr.File(
-                        label="Step 2: RVC Feature Index (*.index - Optional)",
-                        file_types=[".index"],
-                        file_count="single",
-                    )
-
-                    pitch_slider = gr.Slider(
-                        minimum=-12,
-                        maximum=12,
-                        value=0,
-                        step=1,
-                        label="Pitch Shift / Transpose (Semitones)",
-                        info="0 = No change | +12 = Female/Child pitch | -12 = Deep male pitch",
-                    )
-
-                start_btn = gr.Button(
-                    "⚡ Start NarutoGen Dubbing",
-                    variant="primary",
-                    size="lg",
-                    elem_classes="btn-naruto",
-                )
-
-                # Quick sample preset
-                sample_file = Path("sample_hindi_english.srt")
-                if sample_file.exists():
-                    gr.Markdown("#### 💡 Quick Test Example")
-                    gr.Examples(
-                        examples=[[str(sample_file), None, 0, 0, 48, "hi-IN-MadhurNeural", 0]],
-                        inputs=[srt_input, video_input, h_input, m_input, s_input, voice_dropdown, pitch_slider],
-                        label="Click to test with sample Hindi-English SRT",
-                    )
-
-            # RIGHT COLUMN: Outputs
-            with gr.Column(scale=6):
-                gr.Markdown("### 🎧 2. Dubbed Master Outputs")
-
-                status_box = gr.Markdown(
-                    """
-                    <div class="status-card">
-                        <b>Ready to dub.</b> Upload your <code>.srt</code> file and optional RVC model, 
-                        then click <b>Start NarutoGen Dubbing</b>.
-                    </div>
-                    """
-                )
-
-                audio_player = gr.Audio(
-                    label="Dubbed Master Audio (.wav)",
-                    type="filepath",
-                    interactive=False,
-                )
-
-                video_player = gr.Video(
-                    label="Final Dubbed Video (.mp4)",
-                    interactive=False,
-                )
+        # Output Section
+        gr.Markdown("### 🎧 Dubbed Master Audio Output")
+        status_box = gr.Markdown(
+            """
+            <div class="status-card">
+                <b>Ready to dub.</b> Upload your <code>.srt</code> file, select the target language, and click <b>Start Dubbing</b>.
+            </div>
+            """
+        )
+        audio_player = gr.Audio(
+            label="Dubbed Naruto Master Audio (.wav)",
+            type="filepath",
+            interactive=False,
+        )
 
         # Connect button event
         start_btn.click(
             fn=gradio_dubbing_handler,
             inputs=[
                 srt_input,
-                video_input,
                 h_input,
                 m_input,
                 s_input,
-                voice_dropdown,
-                pth_input,
-                index_input,
-                pitch_slider,
+                lang_dropdown,
             ],
             outputs=[
                 status_box,
                 audio_player,
-                video_player,
             ],
         )
 
