@@ -412,8 +412,9 @@ class CharacterVoiceConverter:
 
     def _init_rvc_engine(self):
         """Initializes the RVC engine."""
+        global RVCInference, RVC_AVAILABLE
         print(f"\n🎙️ [STEP 2: RVC] Initializing RVC Engine with model: {Path(self.model_path).name}...")
-        if not RVC_AVAILABLE:
+        if not RVC_AVAILABLE or RVCInference is None:
             try:
                 import subprocess
                 print("⚡ [RVC AUTO-INSTALL] 'rvc-python' not detected. Installing pre-built wheels...")
@@ -427,11 +428,20 @@ class CharacterVoiceConverter:
                 ])
                 _patch_tensorboard_for_fairseq()
                 from rvc_python.infer import RVCInference
-                globals()["RVC_AVAILABLE"] = True
-                globals()["RVCInference"] = RVCInference
+                RVC_AVAILABLE = True
                 print("✅ [RVC AUTO-INSTALL] RVC inference engine installed successfully!")
             except Exception as e:
                 print(f"⚠️ [RVC NOTICE] 'rvc-python' not installed ({e}). Falling back to base TTS.")
+                return
+
+        if RVCInference is None:
+            try:
+                _patch_tensorboard_for_fairseq()
+                from rvc_python.infer import RVCInference
+                RVC_AVAILABLE = True
+            except Exception as e:
+                print(f"⚠️ [RVC LOAD ERROR] Cannot import RVCInference: {e}. Falling back to baseline TTS.")
+                self.engine = None
                 return
 
         try:
