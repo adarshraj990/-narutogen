@@ -34,9 +34,16 @@ from typing import List, Tuple, Dict, Any, Optional
 import numpy as np
 import soundfile as sf
 import librosa
-import pysrt
 from pydub import AudioSegment
 import gradio as gr
+
+# Try importing pysrt with graceful fallback
+try:
+    import pysrt
+    PYSRT_AVAILABLE = True
+except ImportError:
+    pysrt = None
+    PYSRT_AVAILABLE = False
 
 # Try importing Edge-TTS
 try:
@@ -143,21 +150,56 @@ class SubtitleCue:
 def parse_srt_file(srt_path: str, total_video_ms: int) -> Tuple[List[SubtitleCue], int]:
     """Parses SRT, cleans dialogue text, filters empty cues, and checks boundary conditions."""
     print(f"📄 [SRT] Parsing subtitles from: {srt_path}")
-    subs = pysrt.open(srt_path, encoding="utf-8")
     cues = []
 
-    for i, sub in enumerate(subs, start=1):
-        clean_txt = clean_subtitle_text(sub.text)
-        if not clean_txt:
-            continue
+    if PYSRT_AVAILABLE and pysrt:
+        try:
+            subs = pysrt.open(srt_path, encoding="utf-8")
+            for i, sub in enumerate(subs, start=1):
+                clean_txt = clean_subtitle_text(sub.text)
+                if not clean_txt:
+                    continue
+                start_ms = int(sub.start.ordinal)
+                end_ms = int(sub.end.ordinal)
+                if end_ms <= start_ms:
+                    end_ms = start_ms + 1000
+                cues.append(SubtitleCue(i, start_ms, end_ms, clean_txt))
+        except Exception as e:
+            print(f"⚠️ [SRT WARNING] pysrt parse error: {e}. Falling back to built-in parser.")
+            cues = []
 
-        start_ms = int(sub.start.ordinal)
-        end_ms = int(sub.end.ordinal)
+    if not cues:
+        # Robust pure-Python regex parser (zero external dependencies)
+        with open(srt_path, "r", encoding="utf-8-sig", errors="ignore") as f:
+            content = f.read()
 
-        if end_ms <= start_ms:
-            end_ms = start_ms + 1000
+        blocks = re.split(r"\n\s*\n", content.strip())
+        pattern = re.compile(
+            r"(\d+)\s*\n\s*(\d{2}:\d{2}:\d{2}[,\.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,\.]\d{3})\s*\n([\s\S]+)"
+        )
+        for block in blocks:
+            match = pattern.search(block.strip())
+            if match:
+                idx = int(match.group(1))
+                def _parse_ts(ts_str):
+                    ts_str = ts_str.strip().replace(",", ".")
+                    parts = ts_str.split(":")
+                    if len(parts) == 3:
+                        h = int(parts[0])
+                        m = int(parts[1])
+                        s_parts = parts[2].split(".")
+                        s = int(s_parts[0])
+                        ms = int(s_parts[1].ljust(3, "0")[:3]) if len(s_parts) > 1 else 0
+                        return ((h * 3600) + (m * 60) + s) * 1000 + ms
+                    return 0
 
-        cues.append(SubtitleCue(i, start_ms, end_ms, clean_txt))
+                start_ms = _parse_ts(match.group(2))
+                end_ms = _parse_ts(match.group(3))
+                clean_txt = clean_subtitle_text(match.group(4))
+                if clean_txt:
+                    if end_ms <= start_ms:
+                        end_ms = start_ms + 1000
+                    cues.append(SubtitleCue(idx, start_ms, end_ms, clean_txt))
 
     print(f"✅ [SRT] Successfully loaded {len(cues)} valid dialogue cues.")
 
