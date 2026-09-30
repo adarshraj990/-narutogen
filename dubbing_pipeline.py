@@ -511,10 +511,22 @@ def get_kokoro_pipeline(lang_code: str = "h") -> Any:
             KPipeline = _KP
             KOKORO_AVAILABLE = True
         except ImportError:
-            raise RuntimeError(
-                "Kokoro-82M TTS is not installed.\n"
-                "Please run: pip install kokoro soundfile misaki"
-            )
+            print("⚡ [KOKORO] 'kokoro' library not found. Auto-installing now...")
+            import subprocess
+            try:
+                subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "-q", "kokoro", "soundfile", "misaki"],
+                    check=True,
+                )
+                from kokoro import KPipeline as _KP  # type: ignore
+                KPipeline = _KP
+                KOKORO_AVAILABLE = True
+                print("✅ [KOKORO] Kokoro installed successfully!")
+            except Exception as e:
+                raise RuntimeError(
+                    f"Kokoro-82M TTS is not installed ({e}).\n"
+                    "Please run: !pip install kokoro soundfile misaki"
+                )
 
     lang_code = lang_code.lower()
     if lang_code not in _KOKORO_PIPELINES:
