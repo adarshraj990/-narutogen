@@ -1,6 +1,17 @@
-# 🍥 NarutoGen: Automated Local & Colab AI Audio Conversion Pipeline
-### High-Speed Anime Voice Conversion (Edge-TTS + RVC RMVPE + Precision Stitching)
-Optimized for Anti-Gravity IDE & Google Colab Free Tier (T4 GPU, 16GB RAM) | 100% Free, NO Paid APIs, Zero OOM Crashes.
+---
+title: Audiogenflow
+emoji: 🎙️
+colorFrom: orange
+colorTo: red
+sdk: gradio
+sdk_version: 4.44.1
+app_file: app.py
+pinned: false
+---
+
+# 🍥 NarutoGen / AudioGenFlow: Automated Multi-Language AI Video Dubbing Pipeline
+### High-Speed Voice Dubbing & Conversion (Kokoro-82M TTS + RVC RMVPE + 2-Hour Chunking)
+Optimized for Hugging Face Spaces & Google Colab | 100% Free, NO Paid APIs, Zero OOM Crashes.
 
 ---
 
