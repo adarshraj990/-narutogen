@@ -513,18 +513,25 @@ def get_kokoro_pipeline(lang_code: str = "h") -> Any:
         except ImportError:
             print("⚡ [KOKORO] 'kokoro' library not found. Auto-installing now...")
             import subprocess
-            try:
-                subprocess.run(
-                    [sys.executable, "-m", "pip", "install", "-q", "kokoro>=0.8.4", "soundfile"],
-                    check=True,
-                )
-                from kokoro import KPipeline as _KP  # type: ignore
-                KPipeline = _KP
-                KOKORO_AVAILABLE = True
-                print("✅ [KOKORO] Kokoro installed successfully!")
-            except Exception as e:
+            installed = False
+            for pkg in ["kokoro", "git+https://github.com/hexgrad/kokoro.git"]:
+                try:
+                    subprocess.run(
+                        [sys.executable, "-m", "pip", "install", "-q", pkg, "soundfile"],
+                        check=True,
+                    )
+                    from kokoro import KPipeline as _KP  # type: ignore
+                    KPipeline = _KP
+                    KOKORO_AVAILABLE = True
+                    installed = True
+                    print(f"✅ [KOKORO] Kokoro installed successfully from {pkg}!")
+                    break
+                except Exception:
+                    continue
+
+            if not installed or KPipeline is None:
                 raise RuntimeError(
-                    f"Kokoro-82M TTS is not installed ({e}).\n"
+                    "Kokoro-82M TTS is not installed.\n"
                     "Please run in Colab: !pip install kokoro soundfile"
                 )
 
