@@ -10,121 +10,62 @@ app_file: app.py
 pinned: false
 ---
 
-# 🍥 NarutoGen / AudioGenFlow: Automated Multi-Language AI Video Dubbing Pipeline
-### High-Speed Voice Dubbing & Conversion (Kokoro-82M TTS + RVC RMVPE + 2-Hour Chunking)
-Optimized for Hugging Face Spaces & Google Colab | 100% Free, NO Paid APIs, Zero OOM Crashes.
+# 🎙️ AudioGenFlow: Automated Multi-Language AI Video Dubbing Studio
+### High-Fidelity Neural Dubbing (Kokoro-82M TTS + RVC RMVPE + 2-Hour Chunking Architecture)
+**100% Free & Open Source | Zero Paid APIs | Zero OOM Crashes | Native Hugging Face Spaces**
 
 ---
 
-## 📁 Project Directory Structure
+## 🌟 Key Architecture & Capabilities
 
-```text
-NARUTOGEN/
-├── models/                     # Project character RVC V2 weights (.pth & .index)
-│   └── naruto/
-│       ├── naruto.pth          # Naruto V2 model weights (~55MB)
-│       └── naruto.index        # Naruto V2 feature index (~12MB)
-├── weights/                    # Standard RVC weights folder (naruto.pth)
-├── logs/                       # Standard RVC logs folder (logs/naruto/naruto.index)
-├── modules/                    # Clean, modular processing components
-│   ├── __init__.py             # Package exports
-│   ├── model_downloader.py     # Automated Naruto RVC model downloader & extractor
-│   ├── tts_generator.py        # Module 1: Edge-TTS synthesis (Hindi, Spanish, French, Portuguese)
-│   ├── rvc_converter.py        # Module 2: RVC batch voice conversion (RMVPE)
-│   └── audio_stitcher.py       # Module 3: Time-sync, canvas assembly & low-RAM stitching
-├── inputs/                     # Input scripts & subtitle files
-│   └── sample_hindi_english.srt
-├── outputs/                    # Exported continuous master audio & converted files
-│   ├── naruto_master.wav
-│   └── naruto_rvc/             # Individual converted Naruto WAVs
-├── test_naruto_rvc_multilingual.py # Automated 4-language RVC conversion test
-├── pipeline.py                 # Automated master CLI pipeline runner
-├── dubbing_pipeline.py         # Full Gradio Web UI application (gr.Blocks + share=True)
-└── requirements.txt            # Python dependencies
-```
+1. **100% Local Kokoro-82M Neural TTS:**
+   - Replaced all external cloud TTS with **Kokoro-82M** running completely offline.
+   - High-fidelity natural prosody for multi-language synthesis (**Hindi, Spanish, French, Portuguese**).
+
+2. **2-Hour Chunking Architecture (Safe for HF Spaces):**
+   - Automatically breaks down long SRT files/scripts into **5-minute sequential slices** (`CHUNK_DURATION_MINUTES = 5`).
+   - Processes each chunk through Kokoro TTS & RVC, saves audio to disk, and forcefully clears memory (`gc.collect()`, `torch.cuda.empty_cache()`).
+   - Total RAM usage is capped under **1.5 GB**, allowing 2-hour long files to process safely without triggering Hugging Face container restarts.
+
+3. **Lossless FFmpeg Stream Assembly:**
+   - Chunks are stitched together instantaneously via FFmpeg stream copy (`-c copy`) without CPU/GPU re-encoding.
+   - Includes an in-memory-safe block-by-block `soundfile` streaming fallback.
+
+4. **Sequential Multi-Language Processing:**
+   - Select multiple target languages in a single run.
+   - The backend processes them sequentially: finishes Language 1 (all chunks + master stitch), then automatically starts Language 2.
+
+5. **Retrieval-based Voice Conversion (RVC V2):**
+   - Converts base Kokoro audio to character voices using **RMVPE pitch extraction**.
+   - Backend URL placeholder to configure your character voice model (`.zip` containing `.pth` and `.index`).
 
 ---
 
-## 🧩 Modular Components Breakdown
+## 🎛️ Minimalist Gradio Web UI
 
-### 0. Model Downloader (`modules/model_downloader.py`)
-- **Direct HuggingFace Source:** `https://huggingface.co/Mboisuper/Naruto_Uzumaki_315_Epochs/resolve/main/naruto-uzumaki.zip`
-- **Auto-Sync:** Checks local cache; automatically downloads with progress tracking and extracts into:
-  - `models/naruto/` (`naruto.pth` and `naruto.index`)
-  - `weights/` (`weights/naruto.pth` for standard RVC tools)
-  - `logs/naruto/` (`logs/naruto/naruto.index`)
-
-### 1. Module 1: TTS Generation (`modules/tts_generator.py`)
-- **Technology:** Microsoft `edge-tts` (asynchronous websocket synthesis).
-- **Zero API Keys:** 100% free, runs without account setup or billing.
-- **Speed:** Synthesizes ~1,200 dialogue lines in **1–2 minutes** using async concurrency (`asyncio.Semaphore`).
-- **Multi-Language Voices:**
-  - **Hindi:** `hi-IN-MadhurNeural` (heroic, clear, assertive — ideal base for Naruto), `hi-IN-SwaraNeural`
-  - **Spanish:** `es-ES-AlvaroNeural`, `es-MX-JorgeNeural`
-  - **French:** `fr-FR-HenriNeural`, `fr-FR-DeniseNeural`
-  - **Portuguese:** `pt-BR-AntonioNeural` (expressive, energetic), `pt-BR-FranciscaNeural`
-  - **English / Hinglish:** `en-US-GuyNeural`, `en-IN-PrabhatNeural`
-- **Output:** Clean 44.1kHz 16-bit PCM `.wav` chunks.
-
-### 2. Module 2: RVC Voice Conversion (`modules/rvc_converter.py`)
-- **Technology:** Retrieval-based Voice Conversion (RVC V2).
-- **Pitch Algorithm:** `rmvpe` (RMVPE provides superior polyphonic pitch estimation, eliminating metallic/robotic artifacts).
-- **Persistent GPU Cache:** Loads model onto GPU memory strictly once, processing all dialogue chunks in batches without re-initializing the neural net.
-- **Batch Function:** `convert_base_audio_to_naruto(audio_inputs, output_dir)` takes base audio files generated by `edge-tts` (for Hindi, Spanish, French, Portuguese) and outputs converted Naruto `.wav` files into `./outputs/naruto_rvc/`.
-- **Parameters:**
-  - `pitch_shift` (`f0_up_key`): `-12` to `+12` semitones.
-  - `index_rate`: `0.75` (retrieval feature strength).
-  - `protect`: `0.33` (protects unvoiced consonants).
-
-### 3. Module 3: Audio Stitching & Synchronization (`modules/audio_stitcher.py`)
-- **Pitch-Preserving Time-Stretch:** Uses `librosa` phase-vocoder (or `pydub` cross-splice) to automatically speed up dialogue chunks that exceed their subtitle timestamp window without altering pitch.
-- **Silence Padding:** Automatically pads shorter lines with silence so dialogue stays in exact lip-sync.
-- **15-Minute RAM Flushing:** Slices and exports audio in 15-minute segments to disk, purging memory variables (`gc.collect()`) so 2-hour audio never crashes Colab's 12GB RAM.
-- **Zero-RAM Concatenation:** Merges all 15-minute segments into the final master `.wav` file via FFmpeg stream copy (or low-memory Python chunk streaming).
+The interface contains strictly the essential controls:
+- **1. Subtitle Upload:** Single `.srt` file.
+- **2. Video Duration:** Numeric inputs for `Hours`, `Minutes`, and `Seconds` (sets timeline boundaries and prevents cutting off background music or credits).
+- **3. Target Languages:** Multi-choice checkboxes (`Hindi`, `Spanish`, `French`, `Portuguese`).
+- **4. Action Button:** Prominent **"Start Dubbing"** button.
 
 ---
 
-## ⚡ Quick Start
+## 🌐 Live Hugging Face Space
 
-### 1. Installation
-```bash
-pip install -r requirements.txt
-# On Linux / Colab:
-apt-get install -y ffmpeg
+The pipeline is live and accessible at:  
+👉 **[https://huggingface.co/spaces/adarshraj990/audiogenflow](https://huggingface.co/spaces/adarshraj990/audiogenflow)**
+
+Whenever changes are pushed to `main`, Hugging Face automatically rebuilds and deploys the container.
+
+---
+
+## ⚙️ Changing Character Voice Model (Backend URL)
+
+To change the RVC character model, edit `CONFIGURED_RVC_MODEL_URL` in [dubbing_pipeline.py](file:///c:/Users/Adarsh/Desktop/NARUTOGEN/dubbing_pipeline.py#L132):
+
+```python
+# 📌 [INSERT RVC MODEL DOWNLOAD LINK HERE]:
+CONFIGURED_RVC_MODEL_URL = "https://huggingface.co/path-to-your-rvc-model.zip"
 ```
-
-### 2. Download Naruto RVC Model (Automatic or Standalone)
-The pipeline will automatically download and unpack the model on first run. You can also trigger it manually:
-```bash
-python -m modules.model_downloader
-```
-This downloads `naruto-uzumaki.zip` directly from HuggingFace and places the `.pth` and `.index` files into:
-- `models/naruto/` (`naruto.pth`, `naruto.index`)
-- `weights/` (`naruto.pth`)
-- `logs/naruto/` (`naruto.index`)
-
-### 3. Run Multilingual Naruto RVC Test (Hindi, Spanish, French, Portuguese)
-Verify Edge-TTS synthesis and RVC batch conversion across 4 languages in under 10 seconds:
-```bash
-python test_naruto_rvc_multilingual.py
-```
-Output files are exported to `./outputs/naruto_rvc/`:
-- `naruto_hindi_base_rvc.wav`
-- `naruto_spanish_base_rvc.wav`
-- `naruto_french_base_rvc.wav`
-- `naruto_portuguese_base_rvc.wav`
-
-### 4. Run Master CLI Pipeline
-```bash
-# Basic run with sample SRT (Hindi):
-python pipeline.py --input inputs/sample_hindi_english.srt --output outputs/naruto_master.wav
-
-# Run with Spanish / Portuguese / French base voice:
-python pipeline.py --input inputs/sample_hindi_english.srt --voice pt_antonio --output outputs/naruto_pt.wav
-```
-
-### 5. Run Gradio Web UI (with Colab share=True public link)
-```bash
-python dubbing_pipeline.py
-```
-Open the generated `https://xxxx.gradio.live` link in any browser to drag-and-drop SRT files, select character models, and monitor real-time progress.
+The pipeline automatically downloads, verifies, and unpacks the `.pth` and `.index` files on launch.
