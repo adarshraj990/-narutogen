@@ -1,4 +1,4 @@
-# Core Audio Processing
+# Core Audio Processing & Subtitles
 pysrt>=1.1.2
 pydub>=0.25.1
 soundfile>=0.12.1
@@ -7,7 +7,6 @@ numpy<2.0.0,>=1.24.0
 
 # Kokoro-82M Local Neural TTS (100% Local, Offline, No API Keys)
 kokoro
-soundfile>=0.12.1
 
 # RVC Runtime Dependencies
 av>=11.0.0
@@ -18,5 +17,6 @@ praat-parselmouth>=0.4.2
 # System Monitoring & PyTorch Utilities
 psutil>=5.9.0
 
-# Web UI (Gradio)
-gradio>=4.0.0
+# Web UI (Gradio & Hugging Face Spaces compatibility)
+gradio>=4.44.1
+huggingface_hub>=0.23.2,<1.0.0
