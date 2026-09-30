@@ -170,58 +170,89 @@ def clean_dialogue_text(text: str) -> str:
     return clean
 
 
+def parse_timestamp_ms(ts_str: str) -> int:
+    """Safely converts any subtitle timestamp string into milliseconds without list index errors."""
+    if not ts_str or not isinstance(ts_str, str):
+        return 0
+    try:
+        clean_ts = ts_str.strip().replace(",", ".")
+        m = re.match(r"^(\d+):(\d{1,2}):(\d{1,2})(?:\.(\d+))?", clean_ts)
+        if m:
+            h = int(m.group(1))
+            minute = int(m.group(2))
+            s = int(m.group(3))
+            ms_raw = m.group(4) or "0"
+            ms = int(ms_raw.ljust(3, "0")[:3])
+            return (h * 3600 + minute * 60 + s) * 1000 + ms
+        m2 = re.match(r"^(\d{1,2}):(\d{1,2})(?:\.(\d+))?", clean_ts)
+        if m2:
+            minute = int(m2.group(1))
+            s = int(m2.group(2))
+            ms_raw = m2.group(3) or "0"
+            ms = int(ms_raw.ljust(3, "0")[:3])
+            return (minute * 60 + s) * 1000 + ms
+    except Exception:
+        pass
+    return 0
+
+
+def read_text_safely(file_path: str) -> str:
+    """Reads a text file with multiple encoding attempts to prevent decode errors."""
+    for enc in ["utf-8-sig", "utf-8", "latin-1", "cp1252"]:
+        try:
+            with open(file_path, "r", encoding=enc, errors="replace") as f:
+                return f.read()
+        except Exception:
+            continue
+    try:
+        with open(file_path, "rb") as f:
+            return f.read().decode("utf-8", errors="ignore")
+    except Exception:
+        return ""
+
+
 def parse_srt(srt_path: str) -> List[SubtitleCue]:
-    """Parses SRT file into SubtitleCue objects with universal line-ending support."""
+    """Parses SRT file into SubtitleCue objects with fail-safe handling against malformed blocks."""
     cues = []
     if PYSRT_AVAILABLE and pysrt:
         try:
             subs = pysrt.open(srt_path, encoding="utf-8")
             for i, sub in enumerate(subs, start=1):
-                clean_txt = clean_dialogue_text(sub.text)
-                if not clean_txt:
+                try:
+                    clean_txt = clean_dialogue_text(getattr(sub, "text", ""))
+                    if not clean_txt:
+                        continue
+                    start_ms = int(getattr(sub.start, "ordinal", 0))
+                    end_ms = int(getattr(sub.end, "ordinal", start_ms + 1000))
+                    if end_ms <= start_ms:
+                        end_ms = start_ms + 1000
+                    cues.append(SubtitleCue(cue_id=i, start_ms=start_ms, end_ms=end_ms, text=clean_txt))
+                except Exception:
                     continue
-                start_ms = int(sub.start.ordinal)
-                end_ms = int(sub.end.ordinal)
-                if end_ms <= start_ms:
-                    end_ms = start_ms + 1000
-                cues.append(SubtitleCue(cue_id=i, start_ms=start_ms, end_ms=end_ms, text=clean_txt))
             if cues:
                 return cues
         except Exception:
             pass
 
-    # Pure-Python universal regex parser fallback
-    with open(srt_path, "r", encoding="utf-8-sig", errors="ignore") as f:
-        content = f.read().replace("\r\n", "\n")
-
-    blocks = re.split(r"\n\s*\n", content.strip())
-    pattern = re.compile(
-        r"(\d+)\s*\n\s*(\d{2}:\d{2}:\d{2}[,\.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,\.]\d{3})\s*\n([\s\S]+)"
+    # Pure-Python universal regex scanner fallback
+    raw_content = read_text_safely(srt_path).replace("\r\n", "\n").replace("\r", "\n")
+    ts_pattern = re.compile(
+        r"(?:(?<=\n)|^)\s*(?:(\d+)\s*\n)?\s*(\d{1,2}:\d{2}:\d{2}[,\.]\d{1,3})\s*-->\s*(\d{1,2}:\d{2}:\d{2}[,\.]\d{1,3})[^\n]*\n([\s\S]*?)(?=(?:\n\s*(?:\d+\s*\n)?\s*\d{1,2}:\d{2}:\d{2}[,\.]\d{1,3}\s*-->)|\Z)"
     )
-
-    def _parse_ts(ts_str):
-        ts_str = ts_str.strip().replace(",", ".")
-        parts = ts_str.split(":")
-        if len(parts) == 3:
-            h = int(parts[0])
-            m = int(parts[1])
-            s_parts = parts[2].split(".")
-            s = int(s_parts[0])
-            ms = int(s_parts[1].ljust(3, "0")[:3]) if len(s_parts) > 1 else 0
-            return ((h * 3600) + (m * 60) + s) * 1000 + ms
-        return 0
-
-    for block in blocks:
-        match = pattern.search(block.strip())
-        if match:
-            idx = int(match.group(1))
-            start_ms = _parse_ts(match.group(2))
-            end_ms = _parse_ts(match.group(3))
-            clean_txt = clean_dialogue_text(match.group(4))
-            if clean_txt:
-                if end_ms <= start_ms:
-                    end_ms = start_ms + 1000
-                cues.append(SubtitleCue(cue_id=idx, start_ms=start_ms, end_ms=end_ms, text=clean_txt))
+    for i, match in enumerate(ts_pattern.finditer(raw_content), start=1):
+        try:
+            raw_idx = match.group(1)
+            cue_id = int(raw_idx) if raw_idx and raw_idx.isdigit() else i
+            start_ms = parse_timestamp_ms(match.group(2))
+            end_ms = parse_timestamp_ms(match.group(3))
+            text_part = clean_dialogue_text(match.group(4))
+            if not text_part:
+                continue
+            if end_ms <= start_ms:
+                end_ms = start_ms + 1000
+            cues.append(SubtitleCue(cue_id=cue_id, start_ms=start_ms, end_ms=end_ms, text=text_part))
+        except Exception:
+            continue
 
     return cues
 

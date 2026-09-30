@@ -28,6 +28,13 @@ import os
 import gc
 import re
 import sys
+
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 import time
 import math
 import shutil
@@ -527,66 +534,158 @@ def clean_subtitle_text(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def parse_srt_file(srt_path: str, total_video_ms: int) -> Tuple[List[SubtitleCue], int]:
-    """Parses SRT subtitles, cleans text, and auto-expands canvas if needed."""
-    print(f"📄 [SRT] Parsing subtitles from: {srt_path}")
-    cues = []
+def parse_timestamp_ms(ts_str: str) -> int:
+    """
+    Safely converts any subtitle timestamp string into milliseconds.
+    Handles:
+      - 00:01:23,456
+      - 00:01:23.456
+      - 0:01:23,45
+      - 00:01:23
+      - 01:23.456 (minutes:seconds)
+    NEVER throws IndexError or ValueError.
+    """
+    if not ts_str or not isinstance(ts_str, str):
+        return 0
+    try:
+        clean_ts = ts_str.strip().replace(",", ".")
+        # Standard format: (hours):(minutes):(seconds).(fraction)
+        m = re.match(r"^(\d+):(\d{1,2}):(\d{1,2})(?:\.(\d+))?", clean_ts)
+        if m:
+            h = int(m.group(1))
+            minute = int(m.group(2))
+            s = int(m.group(3))
+            ms_raw = m.group(4) or "0"
+            ms = int(ms_raw.ljust(3, "0")[:3])
+            return (h * 3600 + minute * 60 + s) * 1000 + ms
 
+        # Short format without hours: (minutes):(seconds).(fraction)
+        m2 = re.match(r"^(\d{1,2}):(\d{1,2})(?:\.(\d+))?", clean_ts)
+        if m2:
+            minute = int(m2.group(1))
+            s = int(m2.group(2))
+            ms_raw = m2.group(3) or "0"
+            ms = int(ms_raw.ljust(3, "0")[:3])
+            return (minute * 60 + s) * 1000 + ms
+    except Exception:
+        pass
+    return 0
+
+
+def read_text_safely(file_path: str) -> str:
+    """Reads a text file with multiple encoding attempts to prevent decode errors."""
+    for enc in ["utf-8-sig", "utf-8", "latin-1", "cp1252"]:
+        try:
+            with open(file_path, "r", encoding=enc, errors="replace") as f:
+                return f.read()
+        except Exception:
+            continue
+    try:
+        with open(file_path, "rb") as f:
+            return f.read().decode("utf-8", errors="ignore")
+    except Exception:
+        return ""
+
+
+def parse_srt_file(srt_path: str, total_video_ms: int) -> Tuple[List[SubtitleCue], int]:
+    """
+    Parses SRT subtitles with a multi-layer, fail-safe engine:
+    1. Item-by-item pysrt parsing with try/except protection per cue.
+    2. Robust regex scanner handling irregular newlines, malformed blocks, and missing indices.
+    3. Line-by-line tolerant fallback scanner for unconventional subtitle files.
+    NEVER throws IndexError: list index out of range.
+    """
+    print(f"📄 [SRT] Parsing subtitles from: {srt_path}")
+    cues: List[SubtitleCue] = []
+
+    # Strategy 1: pysrt with per-item exception handling
     if PYSRT_AVAILABLE and pysrt:
         try:
             subs = pysrt.open(srt_path, encoding="utf-8")
             for i, sub in enumerate(subs, start=1):
-                clean_txt = clean_subtitle_text(sub.text)
-                if not clean_txt:
-                    continue
-                start_ms = int(sub.start.ordinal)
-                end_ms = int(sub.end.ordinal)
-                if end_ms <= start_ms:
-                    end_ms = start_ms + 1000
-                cues.append(SubtitleCue(i, start_ms, end_ms, clean_txt))
-        except Exception:
-            cues = []
-
-    if not cues:
-        with open(srt_path, "r", encoding="utf-8-sig", errors="ignore") as f:
-            content = f.read().replace("\r\n", "\n")
-
-        blocks = re.split(r"\n\s*\n", content.strip())
-        pattern = re.compile(
-            r"(\d+)\s*\n\s*(\d{2}:\d{2}:\d{2}[,\.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,\.]\d{3})\s*\n([\s\S]+)"
-        )
-
-        def _parse_ts(ts_str):
-            parts = ts_str.strip().replace(",", ".").split(":")
-            if len(parts) == 3:
-                h = int(parts[0])
-                m = int(parts[1])
-                s_parts = parts[2].split(".")
-                s = int(s_parts[0])
-                ms = int(s_parts[1].ljust(3, "0")[:3]) if len(s_parts) > 1 else 0
-                return ((h * 3600) + (m * 60) + s) * 1000 + ms
-            return 0
-
-        for block in blocks:
-            match = pattern.search(block.strip())
-            if match:
-                idx = int(match.group(1))
-                start_ms = _parse_ts(match.group(2))
-                end_ms = _parse_ts(match.group(3))
-                clean_txt = clean_subtitle_text(match.group(4))
-                if clean_txt:
+                try:
+                    txt = getattr(sub, "text", "")
+                    clean_txt = clean_subtitle_text(txt)
+                    if not clean_txt:
+                        continue
+                    start_val = getattr(sub.start, "ordinal", None)
+                    end_val = getattr(sub.end, "ordinal", None)
+                    if start_val is None:
+                        continue
+                    start_ms = int(start_val)
+                    end_ms = int(end_val) if end_val is not None else start_ms + 1000
                     if end_ms <= start_ms:
                         end_ms = start_ms + 1000
-                    cues.append(SubtitleCue(idx, start_ms, end_ms, clean_txt))
+                    cues.append(SubtitleCue(i, start_ms, end_ms, clean_txt))
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+    # Strategy 2: Robust Universal Regex Scanner (tolerant of malformed blocks & extra newlines)
+    if not cues:
+        raw_content = read_text_safely(srt_path).replace("\r\n", "\n").replace("\r", "\n")
+        ts_pattern = re.compile(
+            r"(?:(?<=\n)|^)\s*(?:(\d+)\s*\n)?\s*(\d{1,2}:\d{2}:\d{2}[,\.]\d{1,3})\s*-->\s*(\d{1,2}:\d{2}:\d{2}[,\.]\d{1,3})[^\n]*\n([\s\S]*?)(?=(?:\n\s*(?:\d+\s*\n)?\s*\d{1,2}:\d{2}:\d{2}[,\.]\d{1,3}\s*-->)|\Z)"
+        )
+        for i, match in enumerate(ts_pattern.finditer(raw_content), start=1):
+            try:
+                raw_idx = match.group(1)
+                cue_id = int(raw_idx) if raw_idx and raw_idx.isdigit() else i
+                start_ms = parse_timestamp_ms(match.group(2))
+                end_ms = parse_timestamp_ms(match.group(3))
+                text_part = clean_subtitle_text(match.group(4))
+                if not text_part:
+                    continue
+                if end_ms <= start_ms:
+                    end_ms = start_ms + 1000
+                cues.append(SubtitleCue(cue_id, start_ms, end_ms, text_part))
+            except Exception:
+                continue
+
+    # Strategy 3: Line-by-line tolerant fallback
+    if not cues:
+        raw_content = read_text_safely(srt_path).replace("\r\n", "\n").replace("\r", "\n")
+        lines = [line.strip() for line in raw_content.split("\n")]
+        i = 0
+        while i < len(lines):
+            try:
+                line = lines[i]
+                if "-->" in line:
+                    arrow_parts = line.split("-->")
+                    if len(arrow_parts) >= 2:
+                        start_ms = parse_timestamp_ms(arrow_parts[0])
+                        end_ms = parse_timestamp_ms(arrow_parts[1])
+                        text_lines = []
+                        i += 1
+                        while i < len(lines) and lines[i] and "-->" not in lines[i]:
+                            if lines[i].isdigit() and (i + 1 < len(lines)) and ("-->" in lines[i + 1]):
+                                break
+                            text_lines.append(lines[i])
+                            i += 1
+                        clean_txt = clean_subtitle_text(" ".join(text_lines))
+                        if clean_txt:
+                            if end_ms <= start_ms:
+                                end_ms = start_ms + 1000
+                            cues.append(SubtitleCue(len(cues) + 1, start_ms, end_ms, clean_txt))
+                        continue
+            except Exception:
+                pass
+            i += 1
 
     print(f"✅ [SRT] Successfully loaded {len(cues)} valid dialogue cues.")
 
-    # Expand canvas if subtitles exceed video duration
-    adjusted_video_ms = total_video_ms
-    if cues and cues[-1].end_ms > total_video_ms:
-        overhang_sec = (cues[-1].end_ms - total_video_ms) / 1000.0
+    # Calculate safe adjusted canvas duration
+    last_cue_end_ms = cues[-1].end_ms if cues else 0
+    if total_video_ms <= 0:
+        adjusted_video_ms = max(5000, last_cue_end_ms + 3000)
+        print(f"🎬 [CANVAS] Duration was 00:00:00. Automatically set canvas to {adjusted_video_ms/1000:.1f}s.")
+    elif last_cue_end_ms > total_video_ms:
+        overhang_sec = (last_cue_end_ms - total_video_ms) / 1000.0
         print(f"⚠️ [CANVAS] Expanding canvas by {overhang_sec:.1f}s to guarantee dialogue is never cut off.")
-        adjusted_video_ms = cues[-1].end_ms + 2000
+        adjusted_video_ms = last_cue_end_ms + 3000
+    else:
+        adjusted_video_ms = total_video_ms
 
     return cues, adjusted_video_ms
 
@@ -739,8 +838,24 @@ class CharacterVoiceConverter:
                 from rvc_python.infer import RVCInference as _RVCClass  # type: ignore
                 RVCInference = _RVCClass
                 RVC_AVAILABLE = True
+            except (ImportError, ModuleNotFoundError):
+                print("⚡ [RVC SETUP] 'rvc_python' not found in environment. Auto-installing 'rvc-python' now...")
+                try:
+                    subprocess.run(
+                        [sys.executable, "-m", "pip", "install", "-q", "rvc-python", "torchcrepe", "faiss-cpu"],
+                        check=True,
+                    )
+                    _patch_tensorboard_for_fairseq()
+                    from rvc_python.infer import RVCInference as _RVCClass  # type: ignore
+                    RVCInference = _RVCClass
+                    RVC_AVAILABLE = True
+                    print("✅ [RVC SETUP] 'rvc-python' installed and verified successfully!")
+                except Exception as install_err:
+                    print(f"💡 [RVC NOTICE] Auto-install of 'rvc-python' failed ({install_err}). Falling back to base Kokoro TTS.")
+                    self.engine = None
+                    return
             except Exception as e:
-                print(f"💡 [RVC NOTICE] 'rvc-python' not available ({e}). Falling back to base Kokoro TTS.")
+                print(f"💡 [RVC NOTICE] 'rvc-python' could not be loaded ({e}). Falling back to base Kokoro TTS.")
                 self.engine = None
                 return
 
@@ -863,6 +978,12 @@ def concat_audio_chunks_ffmpeg(chunk_paths: List[Path], output_path: Path) -> Pa
     output_path = Path(output_path).resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    if not chunk_paths:
+        # Generate safe silence file if no chunk files exist
+        silent = AudioSegment.silent(duration=1000, frame_rate=SAMPLE_RATE)
+        silent.export(str(output_path), format="wav")
+        return output_path
+
     if len(chunk_paths) == 1:
         shutil.copy2(chunk_paths[0], output_path)
         return output_path
@@ -930,14 +1051,15 @@ def process_single_language_chunked(
 
     pipeline = get_kokoro_pipeline(lang_code)
 
-    num_chunks = math.ceil(total_video_ms / CHUNK_DURATION_MS)
+    num_chunks = max(1, math.ceil(total_video_ms / CHUNK_DURATION_MS))
     print(f"\n📦 [CHUNKING ENGINE] Processing '{lang_name}' across {num_chunks} chunks ({CHUNK_DURATION_MINUTES} mins/chunk)...")
 
     # Group cues by chunk window
     cues_by_chunk: Dict[int, List[SubtitleCue]] = {idx: [] for idx in range(num_chunks)}
     for cue in cues:
-        c_idx = min(cue.start_ms // CHUNK_DURATION_MS, num_chunks - 1)
-        cues_by_chunk[c_idx].append(cue)
+        c_idx = min(max(0, cue.start_ms // CHUNK_DURATION_MS), num_chunks - 1)
+        if c_idx in cues_by_chunk:
+            cues_by_chunk[c_idx].append(cue)
 
     chunk_output_files: List[Path] = []
     chunk_temp_dir = work_dir / f"chunks_{lang_code}"
@@ -946,8 +1068,16 @@ def process_single_language_chunked(
     for c_idx in range(num_chunks):
         c_start_ms = c_idx * CHUNK_DURATION_MS
         c_end_ms = min((c_idx + 1) * CHUNK_DURATION_MS, total_video_ms)
-        c_dur_ms = c_end_ms - c_start_ms
-        chunk_cues = cues_by_chunk[c_idx]
+        c_dur_ms = max(1000, c_end_ms - c_start_ms)
+        chunk_cues = cues_by_chunk.get(c_idx, [])
+
+        if not chunk_cues:
+            # If this 5-minute chunk has no dialogue lines, generate silent canvas to maintain exact timeline sync
+            chunk_canvas = AudioSegment.silent(duration=c_dur_ms, frame_rate=SAMPLE_RATE)
+            chunk_slice_wav = chunk_temp_dir / f"slice_{c_idx:04d}.wav"
+            chunk_canvas.export(str(chunk_slice_wav), format="wav")
+            chunk_output_files.append(chunk_slice_wav)
+            continue
 
         print(f"\n🧩 [{lang_name} | Chunk {c_idx + 1}/{num_chunks}] [{c_start_ms//60000}m -> {c_end_ms//60000}m] with {len(chunk_cues)} cues...")
 
