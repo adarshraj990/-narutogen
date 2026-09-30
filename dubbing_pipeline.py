@@ -1273,25 +1273,51 @@ def build_ui():
 # [INSERT RVC MODEL DOWNLOAD LINK HERE]
 CUSTOM_RVC_MODEL_DOWNLOAD_URL = CONFIGURED_RVC_MODEL_URL
 
+def launch_gradio_app(demo_app):
+    """
+    Robust Gradio launcher that seamlessly handles:
+    1. Hugging Face Spaces (native zero-config launch)
+    2. Google Colab (public shareable link https://xxxx.gradio.live)
+    3. Localhost / Remote Server with automatic fallback
+    """
+    is_hf_space = os.getenv("SPACE_ID") is not None or os.getenv("SYSTEM") == "spaces"
+
+    # Strategy 1: Hugging Face Spaces native launch (HF handles port/routing internally)
+    if is_hf_space:
+        try:
+            print("🌐 [LAUNCH] Detected Hugging Face Spaces environment. Launching native interface...")
+            demo_app.queue().launch()
+            return
+        except Exception as e:
+            print(f"💡 [LAUNCH] HF Space native launch notice: {e}. Retrying with public link...")
+
+    # Strategy 2: Google Colab & Remote environments (share=True creates public https://xxxx.gradio.live link)
+    try:
+        print("🌐 [LAUNCH] Launching with share=True for Colab / Remote browser access...")
+        demo_app.queue().launch(
+            share=True,
+            show_error=True,
+        )
+        return
+    except Exception as err:
+        print(f"⚠️ [LAUNCH] share=True notice ({err}). Retrying with local server...")
+
+    # Strategy 3: Standard local fallback
+    try:
+        demo_app.queue().launch(
+            share=False,
+            show_error=True,
+        )
+    except Exception as err2:
+        print(f"⚠️ [LAUNCH] Local launch notice ({err2}). Attempting forced share=True...")
+        demo_app.queue().launch(share=True)
+
+
 if __name__ == "__main__":
     demo = build_ui()
     print("\n" + "=" * 75)
     print("🚀 [DUBBING STUDIO] Launching Interactive Web Interface...")
     print(f"🎙️ Configured RVC Model URL: {CUSTOM_RVC_MODEL_DOWNLOAD_URL}")
     print("=" * 75 + "\n")
+    launch_gradio_app(demo)
 
-    # In Hugging Face Spaces (SPACE_ID is set), do not use share=True as HF hosts directly
-    is_hf_space = os.getenv("SPACE_ID") is not None
-    try:
-        demo.queue().launch(
-            share=not is_hf_space,
-            server_name="0.0.0.0",
-            server_port=7860,
-            show_error=True,
-        )
-    except OSError:
-        demo.queue().launch(
-            share=not is_hf_space,
-            server_name="0.0.0.0",
-            show_error=True,
-        )
