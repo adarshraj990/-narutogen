@@ -22,6 +22,8 @@ import time
 import math
 import shutil
 import tempfile
+import zipfile
+import urllib.request
 from pathlib import Path
 from typing import List, Tuple, Dict, Any, Optional
 
@@ -169,6 +171,235 @@ def get_memory_stats() -> str:
     except Exception:
         pass
     return f"{ram_str}{vram_str}"
+
+
+# ==================================================================================================
+# 3.5 RVC MODEL AUTO-DOWNLOADER & EXTRACTOR (100% SELF-CONTAINED)
+# ==================================================================================================
+def normalize_huggingface_url(url: str) -> str:
+    """Normalizes Hugging Face URLs by converting /blob/ to /resolve/ for direct downloading."""
+    url = url.strip()
+    if "huggingface.co" in url and "/blob/" in url:
+        url = url.replace("/blob/", "/resolve/")
+    return url
+
+
+def _format_bytes(bytes_count: int) -> str:
+    """Format bytes to human-readable string (KB, MB, GB)."""
+    if bytes_count < 1024:
+        return f"{bytes_count} B"
+    elif bytes_count < 1024 * 1024:
+        return f"{bytes_count / 1024:.1f} KB"
+    elif bytes_count < 1024 * 1024 * 1024:
+        return f"{bytes_count / (1024 * 1024):.2f} MB"
+    else:
+        return f"{bytes_count / (1024 * 1024 * 1024):.2f} GB"
+
+
+def download_file_with_progress(url: str, output_path: Path, chunk_size: int = 1024 * 64) -> Path:
+    """Downloads a remote file with a live console progress bar and download stats."""
+    url = normalize_huggingface_url(url)
+    output_path = Path(output_path).resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_download_path = output_path.with_suffix(output_path.suffix + ".downloading")
+
+    print(f"\n🌐 [DOWNLOAD] Fetching RVC model archive from:")
+    print(f"   🔗 URL: {url}")
+    print(f"   📁 Destination: {output_path.name}")
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        )
+    }
+    req = urllib.request.Request(url, headers=headers)
+    start_time = time.time()
+    try:
+        with urllib.request.urlopen(req, timeout=90) as response, open(temp_download_path, "wb") as out_file:
+            content_length = response.headers.get("Content-Length")
+            total_size = int(content_length) if content_length and content_length.isdigit() else 0
+            downloaded = 0
+            last_print = 0
+
+            while True:
+                chunk = response.read(chunk_size)
+                if not chunk:
+                    break
+                out_file.write(chunk)
+                downloaded += len(chunk)
+
+                now = time.time()
+                if now - last_print >= 0.15 or (total_size and downloaded >= total_size):
+                    elapsed = max(0.001, now - start_time)
+                    speed = downloaded / elapsed
+                    speed_str = f"{_format_bytes(int(speed))}/s"
+
+                    if total_size > 0:
+                        pct = (downloaded / total_size) * 100
+                        bar_len = 30
+                        filled = int(bar_len * downloaded / total_size)
+                        bar = "█" * filled + "░" * (bar_len - filled)
+                        sys.stdout.write(
+                            f"\r   ⏳ [{bar}] {pct:5.1f}% | {_format_bytes(downloaded)} / {_format_bytes(total_size)} | {speed_str} "
+                        )
+                    else:
+                        sys.stdout.write(f"\r   ⏳ Downloaded: {_format_bytes(downloaded)} | {speed_str} ")
+                    sys.stdout.flush()
+                    last_print = now
+
+            sys.stdout.write("\n")
+
+        if output_path.exists():
+            output_path.unlink()
+        temp_download_path.rename(output_path)
+        total_time = max(0.001, time.time() - start_time)
+        print(f"✅ [DOWNLOAD COMPLETE] Saved {output_path.name} ({_format_bytes(output_path.stat().st_size)}) in {total_time:.1f}s.")
+        return output_path
+
+    except Exception as e:
+        if temp_download_path.exists():
+            temp_download_path.unlink()
+        print(f"❌ [DOWNLOAD FAILED] Error downloading {url}: {e}")
+        raise
+
+
+def extract_rvc_zip(zip_path: Path, extract_to: Path) -> Tuple[Optional[Path], Optional[Path]]:
+    """Extracts zip archive and discovers the largest .pth and .index files."""
+    extract_to = Path(extract_to).resolve()
+    extract_to.mkdir(parents=True, exist_ok=True)
+
+    print(f"\n📦 [EXTRACT] Unpacking archive: {zip_path.name}...")
+    with zipfile.ZipFile(zip_path, "r") as z:
+        z.extractall(extract_to)
+
+    pth_file: Optional[Path] = None
+    index_file: Optional[Path] = None
+
+    for p in extract_to.rglob("*.pth"):
+        if not pth_file or p.stat().st_size > pth_file.stat().st_size:
+            pth_file = p
+
+    for p in extract_to.rglob("*.index"):
+        if not index_file or p.stat().st_size > index_file.stat().st_size:
+            index_file = p
+
+    if pth_file:
+        print(f"   🎯 Found Model Weights: {pth_file.name} ({_format_bytes(pth_file.stat().st_size)})")
+    if index_file:
+        print(f"   🎯 Found Feature Index: {index_file.name} ({_format_bytes(index_file.stat().st_size)})")
+
+    return pth_file, index_file
+
+
+def setup_model_directories(
+    discovered_pth: Path,
+    discovered_index: Optional[Path],
+    models_dir: Path,
+    weights_dir: Path,
+    logs_dir: Path,
+) -> Dict[str, str]:
+    """Organizes model and index files into project paths and standard RVC locations."""
+    models_dir = Path(models_dir).resolve()
+    weights_dir = Path(weights_dir).resolve()
+    logs_dir = Path(logs_dir).resolve()
+
+    models_dir.mkdir(parents=True, exist_ok=True)
+    weights_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir.mkdir(parents=True, exist_ok=True)
+
+    primary_pth = models_dir / "character.pth"
+    if discovered_pth.resolve() != primary_pth.resolve():
+        shutil.copy2(discovered_pth, primary_pth)
+
+    orig_pth_dest = models_dir / discovered_pth.name
+    if orig_pth_dest.resolve() != discovered_pth.resolve() and orig_pth_dest.resolve() != primary_pth.resolve():
+        shutil.copy2(discovered_pth, orig_pth_dest)
+
+    rvc_weights_pth = weights_dir / discovered_pth.name
+    shutil.copy2(discovered_pth, rvc_weights_pth)
+    rvc_canonical_pth = weights_dir / "character.pth"
+    if rvc_canonical_pth.resolve() != rvc_weights_pth.resolve():
+        shutil.copy2(discovered_pth, rvc_canonical_pth)
+
+    primary_index: Optional[Path] = None
+    if discovered_index and discovered_index.exists():
+        primary_index = models_dir / "character.index"
+        if discovered_index.resolve() != primary_index.resolve():
+            shutil.copy2(discovered_index, primary_index)
+
+        orig_index_dest = models_dir / discovered_index.name
+        if orig_index_dest.resolve() != discovered_index.resolve() and orig_index_dest.resolve() != primary_index.resolve():
+            shutil.copy2(discovered_index, orig_index_dest)
+
+        rvc_logs_index = logs_dir / discovered_index.name
+        shutil.copy2(discovered_index, rvc_logs_index)
+        rvc_canonical_index = logs_dir / "character.index"
+        if rvc_canonical_index.resolve() != rvc_logs_index.resolve():
+            shutil.copy2(discovered_index, rvc_canonical_index)
+
+    return {
+        "model_path": str(primary_pth),
+        "index_path": str(primary_index) if primary_index else "",
+        "weights_path": str(rvc_weights_pth),
+        "logs_path": str(logs_dir),
+    }
+
+
+def ensure_character_model(
+    url: str = CONFIGURED_RVC_MODEL_URL,
+    project_root: Optional[str] = None,
+    force: bool = False,
+) -> Dict[str, str]:
+    """Ensures character model exists locally; downloads and extracts if missing."""
+    url = normalize_huggingface_url(url)
+    root = Path(project_root).resolve() if project_root else Path.cwd().resolve()
+    models_dir = root / "models" / "character"
+    weights_dir = root / "weights"
+    logs_dir = root / "logs" / "character"
+
+    primary_pth = models_dir / "character.pth"
+    primary_index = models_dir / "character.index"
+
+    if not force:
+        pth_candidates = [
+            primary_pth,
+            root / "models" / "naruto" / "naruto.pth",
+            root / "models" / "naruto" / "naruto-uzumaki-by-mboisuper.pth",
+            weights_dir / "character.pth",
+        ]
+        if weights_dir.exists():
+            pth_candidates.extend(list(weights_dir.glob("*.pth")))
+        if (root / "models").exists():
+            pth_candidates.extend(list((root / "models").rglob("*.pth")))
+
+        for cand in pth_candidates:
+            if cand.exists() and cand.stat().st_size > 10_000_000:
+                idx_cand = cand.with_suffix(".index")
+                found_index = str(idx_cand.resolve()) if idx_cand.exists() else ""
+                if not found_index and primary_index.exists():
+                    found_index = str(primary_index.resolve())
+                return {
+                    "model_path": str(cand.resolve()),
+                    "index_path": found_index,
+                    "weights_path": str(weights_dir),
+                    "logs_path": str(logs_dir),
+                }
+
+    temp_dir = root / "models" / "temp_download"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    zip_dest = temp_dir / "rvc_model.zip"
+
+    download_file_with_progress(url, zip_dest)
+    disc_pth, disc_index = extract_rvc_zip(zip_dest, temp_dir / "extracted")
+
+    if not disc_pth or not disc_pth.exists():
+        raise RuntimeError(f"No valid .pth weights found in downloaded archive: {url}")
+
+    paths = setup_model_directories(disc_pth, disc_index, models_dir, weights_dir, logs_dir)
+    shutil.rmtree(temp_dir, ignore_errors=True)
+    return paths
 
 
 # ==================================================================================================
@@ -416,7 +647,6 @@ class CharacterVoiceConverter:
             # If still not found, automatically download the configured RVC model
             if not self.model_path or not os.path.exists(self.model_path):
                 try:
-                    from modules.model_downloader import ensure_character_model
                     print(f"🎙️ [RVC SETUP] Model weights not found locally. Auto-downloading from configured URL...")
                     m_info = ensure_character_model(url=self.model_url)
                     self.model_path = m_info.get("model_path")
