@@ -6,8 +6,8 @@ librosa>=0.10.1
 numpy<2.0.0,>=1.24.0
 
 # Kokoro-82M Local Neural TTS (100% Local, Offline, No API Keys)
-kokoro>=0.3.4
-misaki>=0.7.0
+kokoro>=0.8.4
+soundfile>=0.12.1
 
 # RVC Runtime Dependencies
 av>=11.0.0

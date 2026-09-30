@@ -515,7 +515,7 @@ def get_kokoro_pipeline(lang_code: str = "h") -> Any:
             import subprocess
             try:
                 subprocess.run(
-                    [sys.executable, "-m", "pip", "install", "-q", "kokoro", "soundfile", "misaki"],
+                    [sys.executable, "-m", "pip", "install", "-q", "kokoro>=0.8.4", "soundfile"],
                     check=True,
                 )
                 from kokoro import KPipeline as _KP  # type: ignore
@@ -525,7 +525,7 @@ def get_kokoro_pipeline(lang_code: str = "h") -> Any:
             except Exception as e:
                 raise RuntimeError(
                     f"Kokoro-82M TTS is not installed ({e}).\n"
-                    "Please run: !pip install kokoro soundfile misaki"
+                    "Please run in Colab: !pip install kokoro soundfile"
                 )
 
     lang_code = lang_code.lower()
@@ -677,23 +677,12 @@ class CharacterVoiceConverter:
         print(f"\n🎙️ [STEP 2: RVC] Initializing RVC Engine with model: {Path(self.model_path).name}...")
         if not RVC_AVAILABLE or RVCInference is None:
             try:
-                import subprocess
-                print("⚡ [RVC AUTO-INSTALL] 'rvc-python' not detected. Installing pre-built wheels...")
-                subprocess.check_call([
-                    sys.executable, "-m", "pip", "install", "-q",
-                    "numpy<2.0.0", "av", "ffmpeg-python", "loguru", "praat-parselmouth",
-                    "fairseq-fixed", "pyworld-fixed", "torchcrepe", "faiss-cpu"
-                ])
-                subprocess.check_call([
-                    sys.executable, "-m", "pip", "install", "-q", "--no-deps", "rvc-python"
-                ])
                 _patch_tensorboard_for_fairseq()
                 from rvc_python.infer import RVCInference as _RVCClass  # type: ignore
                 RVCInference = _RVCClass
                 RVC_AVAILABLE = True
-                print("✅ [RVC AUTO-INSTALL] RVC inference engine installed successfully!")
             except Exception as e:
-                print(f"⚠️ [RVC NOTICE] 'rvc-python' not installed ({e}). Falling back to base TTS.")
+                print(f"💡 [RVC NOTICE] 'rvc-python' not available ({e}). Falling back to base Kokoro TTS.")
                 self.engine = None
                 return
 
