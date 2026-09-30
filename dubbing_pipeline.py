@@ -1,16 +1,26 @@
 """
 ====================================================================================================
-🍥 NARUTOGEN: STREAMLINED KOKORO-82M + RVC DUBBING PIPELINE
+🍥 PRODUCTION MULTI-LANGUAGE DUBBING PIPELINE (HUGGING FACE SPACES & COLAB OPTIMIZED)
 ====================================================================================================
-Architecture: Two-Step High-Fidelity Local Voice Generation & Conversion
-1. Step 1 (Local Neural TTS): Kokoro-82M generates expressive, high-quality base audio (.wav) locally.
-   - 100% Free, NO API keys, NO cloud subscriptions, runs entirely local / offline.
-   - Multi-Language Support: Hindi, Spanish, French, and Portuguese.
-2. Step 2 (Voice Conversion): RVC V2 (Retrieval-based Voice Conversion) with RMVPE pitch extraction
-   transforms base audio into the desired character or creator voice (e.g., CarryMinati / Naruto).
-3. Step 3 (Time-Sync & Assembly): Phase vocoder time-stretching matches dialogue to exact SRT timestamps,
-   slicing in 15-minute windows for zero RAM bloat.
-4. Minimalist Web UI: Clean Gradio interface with only SRT upload, duration, language dropdown, and dub button.
+Architecture & Core Features:
+1. 100% Free & Local TTS: Powered by Kokoro-82M Neural TTS (zero edge-tts, zero API keys).
+2. Smart Chunking & Memory Optimization (HF Spaces Safe):
+   - Automatically breaks down long scripts/SRT subtitles (even 2+ hour videos) into 5-minute chunks.
+   - Processes each chunk sequentially through Kokoro TTS and RVC to guarantee zero OOM crashes.
+   - Empties GPU VRAM (`torch.cuda.empty_cache()`) and forces garbage collection after every chunk.
+   - Merges processed chunk slices back together via FFmpeg lossless stream copy (with streaming fallback).
+3. Sequential Multi-Language Processing:
+   - Supports selecting multiple languages in a single run (Hindi, Spanish, French, Portuguese).
+   - Processes each language sequentially: finishes Language 1 (all chunks + master merge), then auto-starts Language 2.
+4. RVC Voice Conversion (RMVPE):
+   - Converts base speech into target character voice with RMVPE pitch extraction.
+   - Pre-configured backend placeholder for RVC model (.zip containing .pth and .index).
+5. Clean Minimalist Gradio UI:
+   - Single SRT file upload
+   - Video Duration inputs (Hours, Minutes, Seconds)
+   - Language Selection Checkboxes (Multiple Choice)
+   - "Start Dubbing" Action button
+   - Absolutely NO manual file uploads for .pth or .index models.
 ====================================================================================================
 """
 
@@ -24,12 +34,15 @@ import shutil
 import tempfile
 import zipfile
 import urllib.request
+import subprocess
 from pathlib import Path
 from typing import List, Tuple, Dict, Any, Optional
 
 import numpy as np
 import soundfile as sf
 from pydub import AudioSegment
+
+# Graceful Gradio import
 try:
     import gradio as gr
     GRADIO_AVAILABLE = True
@@ -37,7 +50,7 @@ except ImportError:
     gr = None  # type: ignore
     GRADIO_AVAILABLE = False
 
-# Try importing librosa with graceful fallback
+# Graceful librosa import
 try:
     import librosa  # type: ignore
     LIBROSA_AVAILABLE = True
@@ -45,7 +58,7 @@ except ImportError:
     librosa = None  # type: ignore
     LIBROSA_AVAILABLE = False
 
-# Try importing pysrt with graceful fallback
+# Graceful pysrt import
 try:
     import pysrt  # type: ignore
     PYSRT_AVAILABLE = True
@@ -53,27 +66,19 @@ except ImportError:
     pysrt = None  # type: ignore
     PYSRT_AVAILABLE = False
 
-# ==================================================================================================
-# 1. KOKORO-82M LOCAL TTS ENGINE (REPLACES EDGE-TTS COMPLETELY)
-# ==================================================================================================
-KOKORO_AVAILABLE = False
-KPipeline = None  # type: ignore
-
+# Optional psutil system monitoring
 try:
-    from kokoro import KPipeline as _KP  # type: ignore
-    KPipeline = _KP
-    KOKORO_AVAILABLE = True
+    import psutil  # type: ignore
 except ImportError:
-    KPipeline = None
-    KOKORO_AVAILABLE = False
+    psutil = None  # type: ignore
+
 
 # ==================================================================================================
-# 2. PATCH TENSORBOARD SHIM FOR FAIRSEQ & RVC
+# 1. PATCH TENSORBOARD SHIM FOR FAIRSEQ & RVC
 # ==================================================================================================
 def _patch_tensorboard_for_fairseq():
-    """Prevents TensorBoard compatibility crashes on Colab when FairSeq is imported."""
+    """Prevents TensorBoard compatibility crashes on Colab/HF Spaces when FairSeq is imported."""
     from unittest.mock import MagicMock
-
     try:
         import tensorboard.compat
         if not hasattr(tensorboard.compat, "notf"):
@@ -82,13 +87,9 @@ def _patch_tensorboard_for_fairseq():
         pass
 
     for mod in [
-        "torch.utils.tensorboard",
-        "torch.utils.tensorboard.writer",
-        "torch.utils.tensorboard._embedding",
-        "tensorboard",
-        "tensorboard.compat",
-        "tensorboard.compat.tf",
-        "tensorboard.lazy",
+        "torch.utils.tensorboard", "torch.utils.tensorboard.writer",
+        "torch.utils.tensorboard._embedding", "tensorboard",
+        "tensorboard.compat", "tensorboard.compat.tf", "tensorboard.lazy",
     ]:
         if mod not in sys.modules:
             mock_mod = MagicMock()
@@ -98,7 +99,7 @@ def _patch_tensorboard_for_fairseq():
 
 _patch_tensorboard_for_fairseq()
 
-# In PyTorch 2.6+, torch.load defaults to weights_only=True which breaks RVC checkpoints
+# PyTorch 2.6+ weights_only compatibility patch for RVC checkpoints
 try:
     import torch  # type: ignore
     _orig_torch_load = torch.load
@@ -121,36 +122,53 @@ except Exception:
     RVCInference = None
     RVC_AVAILABLE = False
 
-# Optional system resource monitoring
-try:
-    import psutil  # type: ignore
-except ImportError:
-    psutil = None  # type: ignore
-
 
 # ==================================================================================================
-# 3. GLOBAL CONFIGURATION & MODEL PLACEHOLDER
+# 2. GLOBAL CONFIGURATION & RVC MODEL PLACEHOLDER
 # ==================================================================================================
-# 📌 RVC MODEL DOWNLOAD URL PLACEHOLDER:
-# You can paste any direct Hugging Face download link (.zip containing .pth and .index) below:
+# 📌 [INSERT RVC MODEL DOWNLOAD LINK HERE]:
+# Paste your direct Hugging Face or direct download link (.zip containing .pth and .index) below.
+# The pipeline automatically downloads and extracts it into models/character/ and weights/.
 CONFIGURED_RVC_MODEL_URL = (
     "https://huggingface.co/ivaan2003/ai-rvc/resolve/main/CarryMinati%20-%20Ajey%20Nagar%20-%20Weights.gg%20Model.zip"
 )
 
-SAMPLE_RATE = 44100          # High-fidelity sample rate for RVC output
+# Audio sample rates
+SAMPLE_RATE = 44100          # High-fidelity master sample rate
 KOKORO_SAMPLE_RATE = 24000   # Native sample rate for Kokoro-82M
-FLUSH_INTERVAL_MINUTES = 15  # 15-minute slice window for memory safety
-FLUSH_INTERVAL_MS = FLUSH_INTERVAL_MINUTES * 60 * 1000  # 900,000 ms
 
-# Target Dubbing Languages (Kokoro-82M Neural Base Voices)
-TARGET_LANGUAGES = {
-    "Hindi (Kokoro TTS)": {"lang_code": "h", "voice": "hm_omega", "name": "Hindi Male (Omega)"},
-    "Spanish": {"lang_code": "e", "voice": "em_alex", "name": "Spanish Male (Alex)"},
-    "French": {"lang_code": "f", "voice": "ff_siwis", "name": "French Female (Siwis)"},
-    "Portuguese": {"lang_code": "p", "voice": "pm_alex", "name": "Portuguese Male (Alex)"},
+# Chunking Configuration (Crucial for HF Spaces 16GB RAM limit & 2-Hour video safety)
+CHUNK_DURATION_MINUTES = 5   # 5-minute slices guarantee < 1.5 GB memory footprint
+CHUNK_DURATION_MS = CHUNK_DURATION_MINUTES * 60 * 1000  # 300,000 ms
+
+# Supported Languages Catalog (Kokoro-82M Neural Voices)
+SUPPORTED_LANGUAGES = {
+    "Hindi": {
+        "lang_code": "h",
+        "voice": "hm_omega",
+        "label": "Hindi (Male - Omega)",
+        "fallback_voices": ["hm_psi", "hf_alpha"],
+    },
+    "Spanish": {
+        "lang_code": "e",
+        "voice": "em_alex",
+        "label": "Spanish (Male - Alex)",
+        "fallback_voices": ["em_santa", "ef_dora"],
+    },
+    "French": {
+        "lang_code": "f",
+        "voice": "ff_siwis",
+        "label": "French (Female - Siwis)",
+        "fallback_voices": [],
+    },
+    "Portuguese": {
+        "lang_code": "p",
+        "voice": "pm_alex",
+        "label": "Portuguese (Male - Alex)",
+        "fallback_voices": ["pm_santa", "pf_dora"],
+    },
 }
 
-# In-memory pipeline cache
 _KOKORO_PIPELINES: Dict[str, Any] = {}
 
 
@@ -174,7 +192,7 @@ def get_memory_stats() -> str:
 
 
 # ==================================================================================================
-# 3.5 RVC MODEL AUTO-DOWNLOADER & EXTRACTOR (100% SELF-CONTAINED)
+# 3. RVC MODEL AUTO-DOWNLOADER & EXTRACTOR
 # ==================================================================================================
 def normalize_huggingface_url(url: str) -> str:
     """Normalizes Hugging Face URLs by converting /blob/ to /resolve/ for direct downloading."""
@@ -197,7 +215,7 @@ def _format_bytes(bytes_count: int) -> str:
 
 
 def download_file_with_progress(url: str, output_path: Path, chunk_size: int = 1024 * 64) -> Path:
-    """Downloads a remote file with a live console progress bar and download stats."""
+    """Downloads remote file with live console progress reporting."""
     url = normalize_huggingface_url(url)
     output_path = Path(output_path).resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -207,13 +225,7 @@ def download_file_with_progress(url: str, output_path: Path, chunk_size: int = 1
     print(f"   🔗 URL: {url}")
     print(f"   📁 Destination: {output_path.name}")
 
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        )
-    }
+    headers = {"User-Agent": "Mozilla/5.0"}
     req = urllib.request.Request(url, headers=headers)
     start_time = time.time()
     try:
@@ -231,14 +243,14 @@ def download_file_with_progress(url: str, output_path: Path, chunk_size: int = 1
                 downloaded += len(chunk)
 
                 now = time.time()
-                if now - last_print >= 0.15 or (total_size and downloaded >= total_size):
+                if now - last_print >= 0.2 or (total_size and downloaded >= total_size):
                     elapsed = max(0.001, now - start_time)
                     speed = downloaded / elapsed
                     speed_str = f"{_format_bytes(int(speed))}/s"
 
                     if total_size > 0:
                         pct = (downloaded / total_size) * 100
-                        bar_len = 30
+                        bar_len = 25
                         filled = int(bar_len * downloaded / total_size)
                         bar = "█" * filled + "░" * (bar_len - filled)
                         sys.stdout.write(
@@ -365,9 +377,8 @@ def ensure_character_model(
     if not force:
         pth_candidates = [
             primary_pth,
-            root / "models" / "naruto" / "naruto.pth",
-            root / "models" / "naruto" / "naruto-uzumaki-by-mboisuper.pth",
             weights_dir / "character.pth",
+            root / "models" / "naruto" / "naruto.pth",
         ]
         if weights_dir.exists():
             pth_candidates.extend(list(weights_dir.glob("*.pth")))
@@ -403,10 +414,10 @@ def ensure_character_model(
 
 
 # ==================================================================================================
-# 4. SRT SUBTITLE PARSER
+# 4. SRT SUBTITLE PARSER & TEXT CLEANER
 # ==================================================================================================
 class SubtitleCue:
-    """Data representation of a single subtitle dialogue."""
+    """Data representation of a single subtitle line."""
     def __init__(self, cue_id: int, start_ms: int, end_ms: int, text: str):
         self.cue_id = cue_id
         self.start_ms = start_ms
@@ -428,8 +439,7 @@ def clean_subtitle_text(text: str) -> str:
     text = re.sub(r"\[.*?\]", "", text)
     text = re.sub(r"\(.*?\)", "", text)
     text = re.sub(r"\{.*?\}", "", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def parse_srt_file(srt_path: str, total_video_ms: int) -> Tuple[List[SubtitleCue], int]:
@@ -453,7 +463,6 @@ def parse_srt_file(srt_path: str, total_video_ms: int) -> Tuple[List[SubtitleCue
             cues = []
 
     if not cues:
-        # Robust pure-Python regex parser (handles all line endings)
         with open(srt_path, "r", encoding="utf-8-sig", errors="ignore") as f:
             content = f.read().replace("\r\n", "\n")
 
@@ -463,8 +472,7 @@ def parse_srt_file(srt_path: str, total_video_ms: int) -> Tuple[List[SubtitleCue
         )
 
         def _parse_ts(ts_str):
-            ts_str = ts_str.strip().replace(",", ".")
-            parts = ts_str.split(":")
+            parts = ts_str.strip().replace(",", ".").split(":")
             if len(parts) == 3:
                 h = int(parts[0])
                 m = int(parts[1])
@@ -499,49 +507,42 @@ def parse_srt_file(srt_path: str, total_video_ms: int) -> Tuple[List[SubtitleCue
 
 
 # ==================================================================================================
-# 5. STEP 1: KOKORO-82M LOCAL BATCH SYNTHESIZER
+# 5. KOKORO-82M LOCAL TTS ENGINE (MULTI-LANGUAGE, ZERO EDGE-TTS)
 # ==================================================================================================
 def get_kokoro_pipeline(lang_code: str = "h") -> Any:
-    """Returns or loads a cached KPipeline instance."""
-    global _KOKORO_PIPELINES, KPipeline, KOKORO_AVAILABLE
-
-    if not KOKORO_AVAILABLE or KPipeline is None:
-        try:
-            from kokoro import KPipeline as _KP  # type: ignore
-            KPipeline = _KP
-            KOKORO_AVAILABLE = True
-        except ImportError:
-            print("⚡ [KOKORO] 'kokoro' library not found. Auto-installing now...")
-            import subprocess
-            installed = False
-            for pkg in ["kokoro", "git+https://github.com/hexgrad/kokoro.git"]:
-                try:
-                    subprocess.run(
-                        [sys.executable, "-m", "pip", "install", "-q", pkg, "soundfile"],
-                        check=True,
-                    )
-                    from kokoro import KPipeline as _KP  # type: ignore
-                    KPipeline = _KP
-                    KOKORO_AVAILABLE = True
-                    installed = True
-                    print(f"✅ [KOKORO] Kokoro installed successfully from {pkg}!")
-                    break
-                except Exception:
-                    continue
-
-            if not installed or KPipeline is None:
-                raise RuntimeError(
-                    "Kokoro-82M TTS is not installed.\n"
-                    "Please run in Colab: !pip install kokoro soundfile"
-                )
+    """Returns or loads a cached KPipeline instance with robust multi-platform auto-install."""
+    global _KOKORO_PIPELINES
 
     lang_code = lang_code.lower()
-    if lang_code not in _KOKORO_PIPELINES:
-        print(f"📦 [KOKORO TTS] Initializing Kokoro-82M pipeline for language '{lang_code}'...")
-        _KOKORO_PIPELINES[lang_code] = KPipeline(lang_code=lang_code)
-        print(f"✅ [KOKORO TTS] Kokoro pipeline ready for language '{lang_code}'.")
+    if lang_code in _KOKORO_PIPELINES:
+        return _KOKORO_PIPELINES[lang_code]
 
-    return _KOKORO_PIPELINES[lang_code]
+    try:
+        from kokoro import KPipeline  # type: ignore
+    except ImportError:
+        print("⚡ [KOKORO SETUP] 'kokoro' library not found. Installing locally...")
+        installed = False
+        for pkg in ["kokoro", "git+https://github.com/hexgrad/kokoro.git"]:
+            try:
+                subprocess.run([sys.executable, "-m", "pip", "install", "-q", pkg, "soundfile"], check=True)
+                from kokoro import KPipeline  # type: ignore
+                installed = True
+                print(f"✅ [KOKORO SETUP] Installed successfully from {pkg}!")
+                break
+            except Exception:
+                continue
+
+        if not installed:
+            raise RuntimeError(
+                "Kokoro-82M TTS is not installed in the environment.\n"
+                "Please run: pip install kokoro soundfile"
+            )
+
+    print(f"📦 [KOKORO TTS] Initializing Kokoro-82M pipeline for language '{lang_code}'...")
+    pipeline = KPipeline(lang_code=lang_code)
+    _KOKORO_PIPELINES[lang_code] = pipeline
+    print(f"✅ [KOKORO TTS] Pipeline ready for language '{lang_code}'.")
+    return pipeline
 
 
 def synthesize_single_cue_kokoro(
@@ -551,7 +552,7 @@ def synthesize_single_cue_kokoro(
     output_wav_path: Path,
     speed: float = 1.0,
 ) -> Path:
-    """Generates audio for a single cue using Kokoro-82M and writes a 24kHz WAV file."""
+    """Synthesizes dialogue for a single cue using Kokoro-82M and writes a 24kHz WAV file."""
     audio_segments = []
     try:
         for _, _, audio in pipeline(cue.text, voice=voice, speed=speed):
@@ -579,43 +580,8 @@ def synthesize_single_cue_kokoro(
         return output_wav_path
 
 
-def batch_generate_kokoro_tts(
-    cues: List[SubtitleCue],
-    lang_code: str = "h",
-    voice: str = "hm_omega",
-    tts_output_dir: Path = Path("./temp_kokoro"),
-    progress_callback=None,
-) -> List[Tuple[SubtitleCue, Path]]:
-    """Synthesizes all dialogue cues locally using Kokoro-82M."""
-    print(f"\n⚡ [STEP 1: KOKORO TTS] Starting local neural synthesis for {len(cues)} cues (Lang: '{lang_code}', Voice: '{voice}')...")
-    tts_output_dir.mkdir(parents=True, exist_ok=True)
-
-    pipeline = get_kokoro_pipeline(lang_code)
-    cue_file_pairs = []
-    total = len(cues)
-    start_time = time.time()
-
-    for i, cue in enumerate(cues, start=1):
-        out_file = tts_output_dir / f"cue_{cue.cue_id:04d}_kokoro.wav"
-        synthesize_single_cue_kokoro(cue, pipeline, voice=voice, output_wav_path=out_file)
-        cue_file_pairs.append((cue, out_file))
-
-        if progress_callback and total > 0:
-            frac = 0.05 + (i / total) * 0.25  # 5% to 30%
-            progress_callback(frac, desc=f"⚡ [Step 1/3] Kokoro TTS: {i}/{total} cues...")
-
-        if i % 25 == 0 or i == total:
-            elapsed = time.time() - start_time
-            rate = i / max(0.001, elapsed)
-            print(f"   ↳ [Kokoro Progress] {i}/{total} cues ({rate:.1f} cues/sec)")
-
-    total_time = time.time() - start_time
-    print(f"✅ [STEP 1: KOKORO TTS] Completed {len(cues)} cues in {total_time:.2f}s! {get_memory_stats()}")
-    return cue_file_pairs
-
-
 # ==================================================================================================
-# 6. STEP 2: RVC VOICE CONVERSION WITH RMVPE PITCH EXTRACTION
+# 6. RVC VOICE CONVERSION ENGINE (RMVPE PITCH EXTRACTION)
 # ==================================================================================================
 class CharacterVoiceConverter:
     """Handles RVC voice conversion using pre-trained .pth weights and .index files."""
@@ -649,10 +615,11 @@ class CharacterVoiceConverter:
                 Path("models/character/character.pth"),
                 Path("weights/character.pth"),
                 Path("models/naruto/naruto.pth"),
-                Path("weights/naruto.pth"),
             ]
-            candidates.extend(list(Path("weights").glob("*.pth")) if Path("weights").exists() else [])
-            candidates.extend(list(Path("models").rglob("*.pth")) if Path("models").exists() else [])
+            if Path("weights").exists():
+                candidates.extend(list(Path("weights").glob("*.pth")))
+            if Path("models").exists():
+                candidates.extend(list(Path("models").rglob("*.pth")))
 
             for cand in candidates:
                 if cand.exists() and cand.stat().st_size > 10_000_000:
@@ -663,7 +630,6 @@ class CharacterVoiceConverter:
                             self.index_path = str(idx_cand.resolve())
                     break
 
-            # If still not found, automatically download the configured RVC model
             if not self.model_path or not os.path.exists(self.model_path):
                 try:
                     print(f"🎙️ [RVC SETUP] Model weights not found locally. Auto-downloading from configured URL...")
@@ -679,7 +645,7 @@ class CharacterVoiceConverter:
             print("💡 [RVC] Running in High-Speed Base Kokoro TTS Mode.")
 
     def _init_rvc_engine(self):
-        """Initializes the RVC engine with GPU support."""
+        """Initializes the RVC engine with GPU acceleration."""
         global RVCInference, RVC_AVAILABLE
         print(f"\n🎙️ [STEP 2: RVC] Initializing RVC Engine with model: {Path(self.model_path).name}...")
         if not RVC_AVAILABLE or RVCInference is None:
@@ -753,62 +719,15 @@ class CharacterVoiceConverter:
             shutil.copyfile(input_wav, output_wav)
             return False
 
-    def batch_convert(
-        self,
-        cue_file_pairs: List[Tuple[SubtitleCue, Path]],
-        rvc_output_dir: Path,
-        progress_callback=None,
-    ) -> List[Tuple[SubtitleCue, Path]]:
-        """Batch-converts all dialogue snippets to the target voice."""
-        rvc_output_dir.mkdir(parents=True, exist_ok=True)
-        total = len(cue_file_pairs)
-
-        if not self.engine:
-            print("⚡ [STEP 2: RVC] Skipping RVC (Base Kokoro TTS mode active).")
-            return cue_file_pairs
-
-        print(f"\n🍥 [STEP 2: RVC] Batch-converting {total} cues to character voice (Pitch: {self.pitch_shift}, RMVPE)...")
-        results = []
-        start_time = time.time()
-
-        for idx, (cue, base_wav) in enumerate(cue_file_pairs, start=1):
-            out_rvc_wav = rvc_output_dir / f"cue_{cue.cue_id:04d}_rvc.wav"
-            self.convert_file(base_wav, out_rvc_wav)
-            cue.rvc_wav_path = str(out_rvc_wav)
-            results.append((cue, out_rvc_wav))
-
-            # Periodic GPU VRAM clearing to prevent OOM
-            if idx % 20 == 0:
-                try:
-                    import torch  # type: ignore
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                except Exception:
-                    pass
-                gc.collect()
-
-            if progress_callback and total > 0:
-                frac = 0.30 + (idx / total) * 0.50  # 30% to 80%
-                progress_callback(frac, desc=f"🍥 [Step 2/3] RVC Converting: {idx}/{total} cues (RMVPE)...")
-
-            if idx % 20 == 0 or idx == total:
-                elapsed = time.time() - start_time
-                rate = idx / max(0.001, elapsed)
-                print(f"   ↳ [RVC Progress] {idx}/{total} cues ({rate:.1f} cues/sec)")
-
-        total_time = time.time() - start_time
-        print(f"✅ [STEP 2: RVC] Completed {total} voice conversions in {total_time:.2f}s ({total_time/60:.2f} mins)! {get_memory_stats()}")
-        return results
-
 
 # ==================================================================================================
-# 7. STEP 3: TIME-SYNCHRONIZATION & MASTER TIMELINE CANVAS ASSEMBLY
+# 7. TIME-SYNC & TIMELINE CANVAS CHUNK ASSEMBLY
 # ==================================================================================================
 def time_sync_audio_file(audio_path: Path, target_dur_ms: int) -> AudioSegment:
     """
-    Fits audio chunk to the exact subtitle duration:
-    - If audio is too long: pitch-preserving time-stretch (librosa phase vocoder).
-    - If audio is too short: natural silence padding.
+    Fits audio chunk to exact subtitle duration:
+    - Pitch-preserving time-stretch via phase vocoder (librosa) if audio is too long.
+    - Clean silence padding if audio is too short.
     """
     try:
         y, sr = sf.read(str(audio_path), dtype="float32")
@@ -818,8 +737,7 @@ def time_sync_audio_file(audio_path: Path, target_dur_ms: int) -> AudioSegment:
         actual_dur_ms = int(round((len(y) / sr) * 1000.0))
 
         if actual_dur_ms > target_dur_ms and LIBROSA_AVAILABLE and librosa:
-            rate = float(actual_dur_ms) / float(target_dur_ms)
-            rate = min(rate, 2.5)  # Cap compression at 2.5x to preserve intelligibility
+            rate = min(float(actual_dur_ms) / float(target_dur_ms), 2.5)  # Cap compression at 2.5x
             y_stretched = librosa.effects.time_stretch(y, rate=rate)
             stretched_int16 = (np.clip(y_stretched, -1.0, 1.0) * 32767).astype(np.int16)
 
@@ -829,11 +747,7 @@ def time_sync_audio_file(audio_path: Path, target_dur_ms: int) -> AudioSegment:
                 frame_rate=sr,
                 channels=1,
             )
-            if len(seg) > target_dur_ms:
-                seg = seg[:target_dur_ms]
-            elif len(seg) < target_dur_ms:
-                seg = seg + AudioSegment.silent(duration=target_dur_ms - len(seg), frame_rate=sr)
-            return seg
+            return seg[:target_dur_ms] if len(seg) > target_dur_ms else seg + AudioSegment.silent(duration=target_dur_ms - len(seg), frame_rate=sr)
 
         elif actual_dur_ms < target_dur_ms:
             audio_int16 = (np.clip(y, -1.0, 1.0) * 32767).astype(np.int16)
@@ -843,8 +757,7 @@ def time_sync_audio_file(audio_path: Path, target_dur_ms: int) -> AudioSegment:
                 frame_rate=sr,
                 channels=1,
             )
-            pad_ms = target_dur_ms - actual_dur_ms
-            return seg + AudioSegment.silent(duration=pad_ms, frame_rate=sr)
+            return seg + AudioSegment.silent(duration=target_dur_ms - actual_dur_ms, frame_rate=sr)
 
         else:
             audio_int16 = (np.clip(y, -1.0, 1.0) * 32767).astype(np.int16)
@@ -857,229 +770,275 @@ def time_sync_audio_file(audio_path: Path, target_dur_ms: int) -> AudioSegment:
 
     except Exception:
         seg = AudioSegment.from_file(str(audio_path))
-        if len(seg) > target_dur_ms:
-            return seg[:target_dur_ms]
-        elif len(seg) < target_dur_ms:
-            return seg + AudioSegment.silent(duration=target_dur_ms - len(seg), frame_rate=SAMPLE_RATE)
-        return seg
+        return seg[:target_dur_ms] if len(seg) > target_dur_ms else seg + AudioSegment.silent(duration=target_dur_ms - len(seg), frame_rate=SAMPLE_RATE)
 
 
-def assemble_master_audio(
-    cue_file_pairs: List[Tuple[SubtitleCue, Path]],
-    total_video_ms: int,
-    output_wav_path: Path,
-    parts_dir: Path,
-    progress_callback=None,
-) -> Path:
-    """Overlays dialogue onto the timeline, flushing 15-min windows to disk for zero-OOM safety."""
-    print(f"\n🎧 [STEP 3: SYNC & ASSEMBLY] Assembling master canvas ({total_video_ms/1000/60:.2f} mins)...")
-    parts_dir.mkdir(parents=True, exist_ok=True)
+def concat_audio_chunks_ffmpeg(chunk_paths: List[Path], output_path: Path) -> Path:
+    """Concatenates audio chunk files using FFmpeg stream copy (zero-RAM, lossless, instant)."""
+    output_path = Path(output_path).resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    num_windows = math.ceil(total_video_ms / FLUSH_INTERVAL_MS)
-    current_window_idx = 0
-    intermediate_files: List[Path] = []
+    if len(chunk_paths) == 1:
+        shutil.copy2(chunk_paths[0], output_path)
+        return output_path
 
-    def init_window_canvas(win_idx: int) -> AudioSegment:
-        win_start = win_idx * FLUSH_INTERVAL_MS
-        win_dur = min(FLUSH_INTERVAL_MS, total_video_ms - win_start)
-        return AudioSegment.silent(duration=win_dur, frame_rate=SAMPLE_RATE)
+    concat_txt = output_path.parent / f"concat_list_{int(time.time()*1000)}.txt"
+    try:
+        with open(concat_txt, "w", encoding="utf-8") as f:
+            for p in chunk_paths:
+                clean_p = str(p.resolve()).replace("\\", "/")
+                f.write(f"file '{clean_p}'\n")
 
-    active_canvas = init_window_canvas(current_window_idx)
-    overflow_buffer: List[Tuple[int, AudioSegment]] = []
-    total_cues = len(cue_file_pairs)
-
-    for i, (cue, audio_file) in enumerate(cue_file_pairs, start=1):
-        synced_seg = time_sync_audio_file(audio_file, cue.target_dur_ms)
-        cue_window_idx = cue.start_ms // FLUSH_INTERVAL_MS
-
-        while cue_window_idx > current_window_idx:
-            part_num = current_window_idx + 1
-            part_path = parts_dir / f"part_{part_num:03d}.wav"
-            print(f"💾 [FLUSH] Exporting 15-min Part {part_num} to disk...")
-            active_canvas.export(str(part_path), format="wav")
-            intermediate_files.append(part_path)
-
-            del active_canvas
-            gc.collect()
-
-            current_window_idx += 1
-            active_canvas = init_window_canvas(current_window_idx)
-
-            for ov_pos, ov_seg in overflow_buffer:
-                active_canvas = active_canvas.overlay(ov_seg, position=ov_pos)
-            overflow_buffer.clear()
-
-        win_start_ms = current_window_idx * FLUSH_INTERVAL_MS
-        local_pos_ms = cue.start_ms - win_start_ms
-        win_dur_ms = len(active_canvas)
-
-        if local_pos_ms + len(synced_seg) > win_dur_ms:
-            split_point = win_dur_ms - local_pos_ms
-            current_slice = synced_seg[:split_point]
-            overflow_slice = synced_seg[split_point:]
-
-            active_canvas = active_canvas.overlay(current_slice, position=local_pos_ms)
-            overflow_buffer.append((0, overflow_slice))
-        else:
-            active_canvas = active_canvas.overlay(synced_seg, position=local_pos_ms)
-
-        if progress_callback and total_cues > 0:
-            frac = 0.80 + (i / total_cues) * 0.15  # 80% to 95%
-            progress_callback(frac, desc=f"🎧 [Step 3/3] Synchronizing dialogue {i}/{total_cues}...")
-
-    # Flush final window
-    part_num = current_window_idx + 1
-    part_path = parts_dir / f"part_{part_num:03d}.wav"
-    active_canvas.export(str(part_path), format="wav")
-    intermediate_files.append(part_path)
-    del active_canvas
-    gc.collect()
-
-    # Outro preservation: Pad trailing silence if video is longer than subtitles
-    current_window_idx += 1
-    while current_window_idx < num_windows:
-        part_num = current_window_idx + 1
-        part_path = parts_dir / f"part_{part_num:03d}.wav"
-        trailing_canvas = init_window_canvas(current_window_idx)
-        trailing_canvas.export(str(part_path), format="wav")
-        intermediate_files.append(part_path)
-        del trailing_canvas
-        gc.collect()
-        current_window_idx += 1
-
-    # Concatenate all parts via FFmpeg (0 MB RAM overhead)
-    concat_txt = parts_dir / "concat_list.txt"
-    with open(concat_txt, "w", encoding="utf-8") as f:
-        for p in intermediate_files:
-            f.write(f"file '{p.resolve()}'\n")
-
-    if shutil.which("ffmpeg"):
         cmd = [
-            "ffmpeg", "-y",
-            "-f", "concat",
-            "-safe", "0",
-            "-i", str(concat_txt),
-            "-c", "copy",
-            str(output_wav_path),
+            "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+            "-i", str(concat_txt), "-c", "copy", str(output_path)
         ]
-        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    else:
-        with sf.SoundFile(str(output_wav_path), mode="w", samplerate=SAMPLE_RATE, channels=1, subtype="PCM_16") as outfile:
-            for p in intermediate_files:
-                with sf.SoundFile(str(p), mode="r") as infile:
-                    while True:
-                        data = infile.read(65536, dtype="int16")
-                        if len(data) == 0:
-                            break
-                        outfile.write(data)
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if res.returncode != 0:
+            raise RuntimeError(f"FFmpeg concat exited with code {res.returncode}")
 
-    print(f"🎉 [MASTER AUDIO COMPLETE] Saved to: {output_wav_path}")
+    except Exception as e:
+        print(f"⚠️ [FFMPEG STREAM CONCAT FALLBACK] Soundfile streaming concatenation: {e}")
+        # Low-memory streaming concatenation block-by-block (zero OOM risk on 2-hour files)
+        with sf.SoundFile(str(output_path), mode='w', samplerate=SAMPLE_RATE, channels=1, subtype='PCM_16') as out_f:
+            for p in chunk_paths:
+                with sf.SoundFile(str(p), mode='r') as in_f:
+                    while True:
+                        block = in_f.read(65536, dtype='float32')
+                        if len(block) == 0:
+                            break
+                        out_f.write(block)
+    finally:
+        if concat_txt.exists():
+            try:
+                concat_txt.unlink()
+            except Exception:
+                pass
+
+    return output_path
+
+
+# ==================================================================================================
+# 8. CHUNK-BASED DUBBING PIPELINE (OOM-PROOF FOR 2-HOUR HF SPACES)
+# ==================================================================================================
+def process_single_language_chunked(
+    cues: List[SubtitleCue],
+    total_video_ms: int,
+    lang_name: str,
+    output_wav_path: Path,
+    converter: CharacterVoiceConverter,
+    work_dir: Path,
+    progress_callback=None,
+    overall_lang_offset: float = 0.0,
+    overall_lang_weight: float = 1.0,
+) -> Path:
+    """
+    Processes a single language in 5-minute chunks:
+    1. Splits timeline into 5-minute chunks.
+    2. Sequentially executes: Kokoro TTS -> RVC Conversion -> Chunk Audio Assembly.
+    3. Flushes each chunk to disk and cleans RAM/VRAM completely before moving to the next.
+    4. Merges all chunk files into the final master WAV via FFmpeg.
+    """
+    lang_meta = SUPPORTED_LANGUAGES.get(lang_name, SUPPORTED_LANGUAGES["Hindi"])
+    lang_code = lang_meta["lang_code"]
+    voice = lang_meta["voice"]
+
+    pipeline = get_kokoro_pipeline(lang_code)
+
+    num_chunks = math.ceil(total_video_ms / CHUNK_DURATION_MS)
+    print(f"\n📦 [CHUNKING ENGINE] Processing '{lang_name}' across {num_chunks} chunks ({CHUNK_DURATION_MINUTES} mins/chunk)...")
+
+    # Group cues by chunk window
+    cues_by_chunk: Dict[int, List[SubtitleCue]] = {idx: [] for idx in range(num_chunks)}
+    for cue in cues:
+        c_idx = min(cue.start_ms // CHUNK_DURATION_MS, num_chunks - 1)
+        cues_by_chunk[c_idx].append(cue)
+
+    chunk_output_files: List[Path] = []
+    chunk_temp_dir = work_dir / f"chunks_{lang_code}"
+    chunk_temp_dir.mkdir(parents=True, exist_ok=True)
+
+    for c_idx in range(num_chunks):
+        c_start_ms = c_idx * CHUNK_DURATION_MS
+        c_end_ms = min((c_idx + 1) * CHUNK_DURATION_MS, total_video_ms)
+        c_dur_ms = c_end_ms - c_start_ms
+        chunk_cues = cues_by_chunk[c_idx]
+
+        print(f"\n🧩 [{lang_name} | Chunk {c_idx + 1}/{num_chunks}] [{c_start_ms//60000}m -> {c_end_ms//60000}m] with {len(chunk_cues)} cues...")
+
+        # Sub-directory for this chunk's temporary audio files
+        sub_dir = chunk_temp_dir / f"chunk_{c_idx:04d}"
+        sub_dir.mkdir(parents=True, exist_ok=True)
+
+        # 1. Kokoro TTS for this chunk
+        for cue in chunk_cues:
+            cue_wav = sub_dir / f"cue_{cue.cue_id:04d}_base.wav"
+            synthesize_single_cue_kokoro(cue, pipeline, voice=voice, output_wav_path=cue_wav)
+            cue.base_wav_path = str(cue_wav)
+
+        # 2. RVC Voice Conversion for this chunk
+        for cue in chunk_cues:
+            if converter.engine:
+                out_rvc_wav = sub_dir / f"cue_{cue.cue_id:04d}_rvc.wav"
+                converter.convert_file(Path(cue.base_wav_path), out_rvc_wav)
+                cue.rvc_wav_path = str(out_rvc_wav)
+            else:
+                cue.rvc_wav_path = cue.base_wav_path
+
+        # 3. Assemble onto a clean 5-minute AudioSegment canvas
+        chunk_canvas = AudioSegment.silent(duration=c_dur_ms, frame_rate=SAMPLE_RATE)
+        for cue in chunk_cues:
+            target_wav = Path(cue.rvc_wav_path)
+            aligned_seg = time_sync_audio_file(target_wav, cue.target_dur_ms)
+            rel_offset = max(0, cue.start_ms - c_start_ms)
+            chunk_canvas = chunk_canvas.overlay(aligned_seg, position=rel_offset)
+
+        # 4. Save chunk slice to disk
+        chunk_slice_wav = chunk_temp_dir / f"slice_{c_idx:04d}.wav"
+        chunk_canvas.export(str(chunk_slice_wav), format="wav")
+        chunk_output_files.append(chunk_slice_wav)
+
+        # 5. MEMORY SAFETY: Zero out chunk buffers & force garbage collection
+        del chunk_canvas
+        shutil.rmtree(sub_dir, ignore_errors=True)
+        gc.collect()
+        try:
+            import torch  # type: ignore
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+        # Progress reporting
+        if progress_callback:
+            chunk_frac = (c_idx + 1) / num_chunks
+            current_overall = overall_lang_offset + (chunk_frac * overall_lang_weight)
+            progress_callback(
+                current_overall,
+                desc=f"⚡ [{lang_name}] Chunk {c_idx + 1}/{num_chunks} complete ({get_memory_stats()})",
+            )
+
+    # 6. Concatenate all chunk files into final master WAV for this language
+    print(f"\n💾 [MERGE] Losslessly concatenating {len(chunk_output_files)} chunk slices into: {output_wav_path.name}...")
+    concat_audio_chunks_ffmpeg(chunk_output_files, output_wav_path)
+
+    # Clean chunk temp files to preserve disk space
+    shutil.rmtree(chunk_temp_dir, ignore_errors=True)
+
+    print(f"✅ [{lang_name}] Master Dubbed Audio generated successfully: {output_wav_path.resolve()}!")
     return output_wav_path
 
 
 # ==================================================================================================
-# 8. MASTER PIPELINE CONTROLLER
+# 9. SEQUENTIAL MULTI-LANGUAGE PIPELINE ORCHESTRATOR
 # ==================================================================================================
-def run_narutogen_pipeline(
+def run_sequential_multi_language_pipeline(
     srt_file: str,
-    output_audio: str = "narutogen_dubbed_audio.wav",
+    output_dir: str = "./outputs/dubbed_masters",
     hours: int = 0,
     minutes: int = 0,
-    seconds: int = 0,
-    target_language: str = "Hindi (Kokoro TTS)",
-    rvc_model_path: Optional[str] = None,
-    rvc_index_path: Optional[str] = None,
+    seconds: int = 48,
+    selected_languages: Optional[List[str]] = None,
     pitch_shift: int = 0,
     progress_callback=None,
 ) -> Dict[str, Any]:
-    """Automates the entire SRT -> Kokoro-82M -> RVC -> Stitched Master Audio workflow."""
+    """
+    Sequentially processes each selected language one-by-one:
+    - Language 1 is 100% completed and merged before Language 2 begins.
+    - Guarantees zero memory leaks on 2-hour videos.
+    """
     pipeline_start = time.time()
-
-    # Step 0: Total duration
     total_video_ms = ((hours * 3600) + (minutes * 60) + seconds) * 1000
-    if total_video_ms <= 0:
-        total_video_ms = 60000
 
-    # Staging folders
-    work_dir = Path(tempfile.gettempdir()) / "narutogen_workspace"
-    tts_dir = work_dir / "step1_kokoro"
-    rvc_dir = work_dir / "step2_rvc"
-    parts_dir = work_dir / "step3_parts"
+    if not selected_languages:
+        selected_languages = ["Hindi"]
 
-    for d in [tts_dir, rvc_dir, parts_dir]:
-        if d.exists():
-            shutil.rmtree(d, ignore_errors=True)
-        d.mkdir(parents=True, exist_ok=True)
+    out_base = Path(output_dir).resolve()
+    out_base.mkdir(parents=True, exist_ok=True)
+    work_dir = Path(tempfile.gettempdir()) / f"dub_run_{int(time.time())}"
+    work_dir.mkdir(parents=True, exist_ok=True)
 
-    if progress_callback:
-        progress_callback(0.02, desc="📄 Parsing SRT subtitles...")
+    print("\n" + "=" * 75)
+    print("🍥 SEQUENTIAL MULTI-LANGUAGE DUBBING PIPELINE (HUGGING FACE SPACES)")
+    print("=" * 75)
+    print(f"Subtitles:        {srt_file}")
+    print(f"Selected Langs:   {selected_languages}")
+    print(f"Target Duration:  {hours:02d}:{minutes:02d}:{seconds:02d} ({total_video_ms/1000:.1f}s)")
+    print(f"Memory Status:    {get_memory_stats()}")
+    print("=" * 75 + "\n")
 
-    # Step 1: Parse SRT
+    # Step 1: Parse SRT subtitles once
     cues, adjusted_video_ms = parse_srt_file(srt_file, total_video_ms)
     if not cues:
-        raise ValueError("No valid dialogue cues found in the uploaded SRT file.")
+        raise ValueError(f"No valid dialogue cues found in SRT file: {srt_file}")
 
-    # Resolve Kokoro voice and language
-    lang_info = TARGET_LANGUAGES.get(target_language, TARGET_LANGUAGES["Hindi (Kokoro TTS)"])
-    lang_code = lang_info["lang_code"]
-    voice = lang_info["voice"]
-
-    # Step 2: Kokoro-82M Local Neural TTS
-    cue_tts_pairs = batch_generate_kokoro_tts(
-        cues=cues,
-        lang_code=lang_code,
-        voice=voice,
-        tts_output_dir=tts_dir,
-        progress_callback=progress_callback,
-    )
-
-    # Step 3: RVC Voice Conversion
+    # Step 2: Initialize RVC model converter (auto-downloads if needed)
     converter = CharacterVoiceConverter(
-        model_path=rvc_model_path,
-        index_path=rvc_index_path,
         pitch_shift=pitch_shift,
         model_url=CONFIGURED_RVC_MODEL_URL,
     )
-    cue_rvc_pairs = converter.batch_convert(cue_tts_pairs, rvc_output_dir=rvc_dir, progress_callback=progress_callback)
 
-    # Step 4: Time-sync and master canvas assembly
-    out_audio_path = Path(output_audio).resolve()
-    final_audio = assemble_master_audio(
-        cue_file_pairs=cue_rvc_pairs,
-        total_video_ms=adjusted_video_ms,
-        output_wav_path=out_audio_path,
-        parts_dir=parts_dir,
-        progress_callback=progress_callback,
-    )
+    results_by_language: Dict[str, str] = {}
+    num_langs = len(selected_languages)
+
+    # Step 3: Sequential Processing Loop
+    for lang_idx, lang_name in enumerate(selected_languages):
+        lang_start = time.time()
+        print(f"\n🌍 ==================================================================")
+        print(f"🌍 [LANGUAGE {lang_idx + 1}/{num_langs}] Starting pipeline for: {lang_name.upper()}")
+        print(f"🌍 ==================================================================")
+
+        lang_slug = lang_name.lower().replace(" ", "_")
+        lang_out_wav = out_base / f"master_dubbed_{lang_slug}_{int(time.time())}.wav"
+
+        lang_offset = lang_idx / num_langs
+        lang_weight = 1.0 / num_langs
+
+        process_single_language_chunked(
+            cues=cues,
+            total_video_ms=adjusted_video_ms,
+            lang_name=lang_name,
+            output_wav_path=lang_out_wav,
+            converter=converter,
+            work_dir=work_dir,
+            progress_callback=progress_callback,
+            overall_lang_offset=lang_offset,
+            overall_lang_weight=lang_weight,
+        )
+
+        results_by_language[lang_name] = str(lang_out_wav)
+        lang_elapsed = time.time() - lang_start
+        print(f"🎉 [LANGUAGE {lang_idx + 1}/{num_langs} COMPLETE] Finished {lang_name} in {lang_elapsed:.1f}s ({lang_elapsed/60:.2f} mins).\n")
+
+    # Clean overall temporary working directory
+    shutil.rmtree(work_dir, ignore_errors=True)
 
     if progress_callback:
-        progress_callback(1.0, desc="🏆 Dubbing Pipeline Complete!")
+        progress_callback(1.0, desc="🏆 All Selected Languages Dubbed & Merged Successfully!")
 
     total_time = time.time() - pipeline_start
-    audio_info = sf.info(str(final_audio))
-
     return {
-        "audio_path": str(final_audio),
+        "results": results_by_language,
         "elapsed_seconds": total_time,
-        "audio_duration_sec": audio_info.duration,
         "cues_count": len(cues),
         "rvc_active": converter.engine is not None,
+        "video_duration_ms": adjusted_video_ms,
     }
 
 
 # ==================================================================================================
-# 9. MINIMAL & CLEAN GRADIO WEB UI INTERFACE
+# 10. CLEAN MINIMALIST GRADIO WEB UI (EXACTLY 4 INPUTS)
 # ==================================================================================================
 CUSTOM_CSS = """
 .gradio-container {
-    max-width: 820px !important;
+    max-width: 840px !important;
     margin: 0 auto !important;
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif !important;
 }
 
-.naruto-header {
+.studio-header {
     text-align: center;
-    padding: 24px 20px;
+    padding: 26px 20px;
     background: linear-gradient(135deg, #181824 0%, #101018 100%);
     border-radius: 16px;
     border: 1px solid rgba(255, 140, 0, 0.25);
@@ -1087,7 +1046,7 @@ CUSTOM_CSS = """
     box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
 }
 
-.naruto-title {
+.studio-title {
     font-size: 2.1rem;
     font-weight: 800;
     background: linear-gradient(90deg, #ff8c00 0%, #ff4500 100%);
@@ -1096,7 +1055,7 @@ CUSTOM_CSS = """
     margin-bottom: 6px;
 }
 
-.naruto-subtitle {
+.studio-subtitle {
     font-size: 0.95rem;
     color: #94a3b8;
 }
@@ -1129,59 +1088,73 @@ CUSTOM_CSS = """
 """
 
 
-def gradio_dubbing_handler(
+def gradio_multi_dubbing_handler(
     srt_file_obj,
     hours: float,
     minutes: float,
     seconds: float,
-    target_language: str,
+    selected_languages: List[str],
     progress=None,
 ):
-    """Clean minimal handler connecting the UI to the pipeline."""
+    """Gradio handler connecting UI to sequential multi-language chunking pipeline."""
     if progress is None and GRADIO_AVAILABLE and gr is not None:
         try:
             progress = gr.Progress(track_tqdm=True)
         except Exception:
             progress = None
+
     if srt_file_obj is None:
-        return "### ⚠️ Please upload an SRT subtitle file (*.srt) to begin.", None
+        return "### ⚠️ Please upload an SRT subtitle file (*.srt) to begin.", None, None
+
+    if not selected_languages:
+        return "### ⚠️ Please select at least one target language from the checkboxes.", None, None
 
     srt_path = getattr(srt_file_obj, "name", str(srt_file_obj))
-
-    out_dir = Path(tempfile.gettempdir()) / "narutogen_outputs"
+    out_dir = Path(tempfile.gettempdir()) / "hf_dubbed_outputs"
     out_dir.mkdir(parents=True, exist_ok=True)
-    stamp = int(time.time())
-    out_audio = str(out_dir / f"master_dubbed_{stamp}.wav")
 
     try:
-        results = run_narutogen_pipeline(
+        pipeline_output = run_sequential_multi_language_pipeline(
             srt_file=srt_path,
-            output_audio=out_audio,
+            output_dir=str(out_dir),
             hours=int(hours or 0),
             minutes=int(minutes or 0),
             seconds=int(seconds or 0),
-            target_language=target_language,
+            selected_languages=selected_languages,
             progress_callback=progress,
         )
 
-        elapsed = results["elapsed_seconds"]
-        dur = results["audio_duration_sec"]
-        rvc_status = "✅ Active (RVC Character Model Loaded)" if results["rvc_active"] else "⚡ Kokoro Neural TTS Baseline"
+        results_dict = pipeline_output["results"]
+        elapsed = pipeline_output["elapsed_seconds"]
+        rvc_active = pipeline_output["rvc_active"]
+
+        generated_file_paths = list(results_dict.values())
+        first_audio_path = generated_file_paths[0] if generated_file_paths else None
+
+        # Build Markdown completion table
+        rvc_status_str = "✅ Active (RMVPE Character Model)" if rvc_active else "⚡ Kokoro Neural TTS Baseline"
+        table_rows = ""
+        for lang, path in results_dict.items():
+            dur_sec = sf.info(path).duration
+            dur_str = f"{int(dur_sec//60):02d}:{int(dur_sec%60):02d}"
+            table_rows += f"| **{lang}** | `{dur_str}` ({dur_sec:.1f}s) | `{Path(path).name}` |\n"
 
         status_markdown = f"""
 ### 🎉 Dubbing Completed Successfully!
 
-| Metric | Result |
+| Language | Audio Duration | File Name |
+| :--- | :--- | :--- |
+{table_rows}
+
+| Pipeline Metric | Result |
 | :--- | :--- |
-| **Target Language** | {target_language} |
-| **Voice Conversion (RVC)** | {rvc_status} |
-| **Audio Duration** | `{int(dur//60):02d}:{int(dur%60):02d}` ({dur:.2f}s) |
-| **Dialogue Lines Processed** | {results["cues_count"]} cues |
+| **Voice Conversion (RVC)** | {rvc_status_str} |
+| **Dialogue Lines Processed** | {pipeline_output["cues_count"]} cues |
 | **Total Processing Time** | **{elapsed:.1f}s** ({elapsed/60:.2f} mins) |
 
-*Listen to or download your master dubbed audio file below.*
+*You can preview the first language below, or download all dubbed `.wav` files.*
 """
-        return status_markdown, results["audio_path"]
+        return status_markdown, first_audio_path, generated_file_paths
 
     except Exception as e:
         err_msg = f"""
@@ -1192,11 +1165,11 @@ An error occurred during execution:
 ```
 *Tip: Ensure your SRT file contains valid timestamps and dialogue.*
 """
-        return err_msg, None
+        return err_msg, None, None
 
 
 def build_ui():
-    """Constructs the clean, minimal Gradio interface (strictly 4 requested elements)."""
+    """Constructs the clean, minimal Gradio interface (strictly 4 requested inputs)."""
     if not GRADIO_AVAILABLE or gr is None:
         raise RuntimeError(
             "Gradio is not installed in the environment.\n"
@@ -1209,41 +1182,42 @@ def build_ui():
         neutral_hue="slate",
     )
 
-    with gr.Blocks(theme=theme, css=CUSTOM_CSS, title="AI Voice Dubbing Studio (Kokoro-82M + RVC)") as demo:
+    with gr.Blocks(theme=theme, css=CUSTOM_CSS, title="AI Video Dubbing Studio (HF Spaces)") as demo:
 
         gr.HTML(
             """
-            <div class="naruto-header">
-                <div class="naruto-title">🎙️ AI Voice Dubbing Studio</div>
-                <div class="naruto-subtitle">
-                    Kokoro-82M Neural TTS + RVC Voice Conversion • 100% Local & Free
+            <div class="studio-header">
+                <div class="studio-title">🎙️ AI Multi-Language Dubbing Studio</div>
+                <div class="studio-subtitle">
+                    Kokoro-82M TTS + RVC Voice Conversion • 2-Hour OOM-Safe Chunking for Hugging Face Spaces
                 </div>
             </div>
             """
         )
 
         with gr.Group():
-            # 1. File Upload (Single .srt file)
+            # 1. Single SRT file upload
             srt_input = gr.File(
                 label="1. Translated SRT Subtitles (*.srt)",
                 file_types=[".srt"],
                 file_count="single",
             )
 
-            # 2. Language Selection Dropdown
-            lang_dropdown = gr.Dropdown(
-                choices=list(TARGET_LANGUAGES.keys()),
-                value="Hindi (Kokoro TTS)",
-                label="2. Target Dubbing Language",
-                info="Generates base speech using local Kokoro-82M neural model",
-            )
-
-            # 3. Video Duration Inputs (Hours, Minutes, Seconds)
-            gr.Markdown("#### 3. Video Duration (Timeline Canvas Setup)")
+            # 2. Video Duration Inputs (Timeline Canvas Setup)
+            gr.Markdown("#### 2. Video Duration (Timeline Canvas Setup)")
             with gr.Row():
                 h_input = gr.Number(label="Hours", value=0, precision=0, minimum=0)
                 m_input = gr.Number(label="Minutes", value=0, precision=0, minimum=0)
                 s_input = gr.Number(label="Seconds", value=48, precision=0, minimum=0)
+
+            # 3. Language Selection Checkboxes (Multiple Choice)
+            gr.Markdown("#### 3. Target Dubbing Languages (Sequential Multi-Language)")
+            lang_checkboxes = gr.CheckboxGroup(
+                choices=list(SUPPORTED_LANGUAGES.keys()),
+                value=["Hindi"],
+                label="Select one or more languages to dub sequentially",
+                info="The pipeline will automatically process each language one after another without crashing.",
+            )
 
             # 4. Action Button
             start_btn = gr.Button(
@@ -1254,71 +1228,70 @@ def build_ui():
             )
 
         # Output Section
-        gr.Markdown("### 🎧 Dubbed Master Audio Output")
+        gr.Markdown("### 🎧 Dubbed Master Audio Outputs")
         status_box = gr.Markdown(
             """
             <div class="status-card">
-                <b>Ready to dub.</b> Upload your <code>.srt</code> file, select the target language, and click <b>Start Dubbing</b>.
+                <b>Ready to dub.</b> Upload your <code>.srt</code> file, check your desired languages, and click <b>Start Dubbing</b>.
             </div>
             """
         )
-        audio_player = gr.Audio(
-            label="Master Dubbed Audio (.wav)",
+        audio_preview = gr.Audio(
+            label="Audio Preview (First Completed Language)",
             type="filepath",
             interactive=False,
+        )
+        download_files = gr.File(
+            label="📥 Download All Dubbed Master Audio Files (.wav)",
+            file_count="multiple",
         )
 
         # Connect button event
         start_btn.click(
-            fn=gradio_dubbing_handler,
+            fn=gradio_multi_dubbing_handler,
             inputs=[
                 srt_input,
                 h_input,
                 m_input,
                 s_input,
-                lang_dropdown,
+                lang_checkboxes,
             ],
             outputs=[
                 status_box,
-                audio_player,
+                audio_preview,
+                download_files,
             ],
         )
 
     return demo
 
 
-# Alias exports for backwards-compatibility
-run_pipeline = run_narutogen_pipeline
-DEFAULT_BATCH_SIZE = 10
-
-
 # ==================================================================================================
-# 10. PUBLIC LAUNCH & MODEL CONFIGURATION SPOT
+# 11. MODEL CONFIGURATION & APPLICATION LAUNCH
 # ==================================================================================================
 # ⚙️ USER MODEL CONFIGURATION:
-# Paste your custom RVC model download link below (Hugging Face .zip containing .pth and .index files).
-# The pipeline will automatically download and extract it to models/character/ and weights/.
-CUSTOM_RVC_MODEL_DOWNLOAD_URL = (
-    "https://huggingface.co/ivaan2003/ai-rvc/resolve/main/CarryMinati%20-%20Ajey%20Nagar%20-%20Weights.gg%20Model.zip"
-)
+# [INSERT RVC MODEL DOWNLOAD LINK HERE]
+CUSTOM_RVC_MODEL_DOWNLOAD_URL = CONFIGURED_RVC_MODEL_URL
 
 if __name__ == "__main__":
     demo = build_ui()
-    print("\n" + "=" * 70)
+    print("\n" + "=" * 75)
     print("🚀 [DUBBING STUDIO] Launching Interactive Web Interface...")
     print(f"🎙️ Configured RVC Model URL: {CUSTOM_RVC_MODEL_DOWNLOAD_URL}")
-    print("=" * 70 + "\n")
+    print("=" * 75 + "\n")
 
+    # In Hugging Face Spaces (SPACE_ID is set), do not use share=True as HF hosts directly
+    is_hf_space = os.getenv("SPACE_ID") is not None
     try:
         demo.queue().launch(
-            share=True,
+            share=not is_hf_space,
             server_name="0.0.0.0",
             server_port=7860,
             show_error=True,
         )
     except OSError:
         demo.queue().launch(
-            share=True,
+            share=not is_hf_space,
             server_name="0.0.0.0",
             show_error=True,
         )
