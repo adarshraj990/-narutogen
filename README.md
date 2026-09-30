@@ -1,7 +1,7 @@
 ---
 title: Audiogenflow
 emoji: 🎙️
-colorFrom: orange
+colorFrom: indigo
 colorTo: red
 sdk: gradio
 sdk_version: 4.44.1
