@@ -17,6 +17,9 @@ praat-parselmouth>=0.4.2
 # System Monitoring & PyTorch Utilities
 psutil>=5.9.0
 
-# Web UI (Gradio & Hugging Face Spaces compatibility)
+# Hugging Face Spaces & Gradio 4.44.1 Stability (prevents 500 Internal Server Error)
 gradio>=4.44.1
-huggingface_hub>=0.23.2,<1.0.0
+huggingface_hub>=0.23.0,<1.0.0
+starlette<1.0.0
+pydantic<2.11.0
+requests
