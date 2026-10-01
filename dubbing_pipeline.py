@@ -36,6 +36,7 @@ if hasattr(sys.stdout, "reconfigure"):
     except Exception:
         pass
 import time
+import datetime
 import math
 import shutil
 import tempfile
@@ -1134,13 +1135,13 @@ def process_single_language_chunked(
             pass
 
         # Progress reporting
-        if progress_callback:
-            chunk_frac = (c_idx + 1) / num_chunks
-            current_overall = overall_lang_offset + (chunk_frac * overall_lang_weight)
-            progress_callback(
-                current_overall,
-                desc=f"⚡ [{lang_name}] Chunk {c_idx + 1}/{num_chunks} complete ({get_memory_stats()})",
-            )
+        chunk_frac = (c_idx + 1) / num_chunks
+        current_overall = overall_lang_offset + (chunk_frac * overall_lang_weight)
+        safe_report_progress(
+            progress_callback,
+            current_overall,
+            desc=f"⚡ [{lang_name}] Chunk {c_idx + 1}/{num_chunks} complete ({get_memory_stats()})",
+        )
 
     # 6. Concatenate all chunk files into final master WAV for this language
     print(f"\n💾 [MERGE] Losslessly concatenating {len(chunk_output_files)} chunk slices into: {output_wav_path.name}...")
@@ -1154,11 +1155,11 @@ def process_single_language_chunked(
 
 
 # ==================================================================================================
-# 9. SEQUENTIAL MULTI-LANGUAGE PIPELINE ORCHESTRATOR
+# 9. SEQUENTIAL MULTI-LANGUAGE PIPELINE ORCHESTRATOR (PERSISTENT & DISCONNECT-SAFE)
 # ==================================================================================================
 def run_sequential_multi_language_pipeline(
     srt_file: str,
-    output_dir: str = "./outputs/dubbed_masters",
+    output_dir: str = "./outputs",
     hours: int = 0,
     minutes: int = 0,
     seconds: int = 48,
@@ -1170,6 +1171,8 @@ def run_sequential_multi_language_pipeline(
     Sequentially processes each selected language one-by-one:
     - Language 1 is 100% completed and merged before Language 2 begins.
     - Guarantees zero memory leaks on 2-hour videos.
+    - Saves all master outputs persistently to disk immediately upon completion.
+    - Survives frontend disconnects safely without terminating.
     """
     pipeline_start = time.time()
     total_video_ms = ((hours * 3600) + (minutes * 60) + seconds) * 1000
@@ -1186,10 +1189,13 @@ def run_sequential_multi_language_pipeline(
     print("🍥 SEQUENTIAL MULTI-LANGUAGE DUBBING PIPELINE (HUGGING FACE SPACES)")
     print("=" * 75)
     print(f"Subtitles:        {srt_file}")
+    print(f"Output Directory: {out_base}")
     print(f"Selected Langs:   {selected_languages}")
     print(f"Target Duration:  {hours:02d}:{minutes:02d}:{seconds:02d} ({total_video_ms/1000:.1f}s)")
     print(f"Memory Status:    {get_memory_stats()}")
     print("=" * 75 + "\n")
+
+    log_pipeline_event(f"Started pipeline run: {len(selected_languages)} languages, output_dir='{out_base}'")
 
     # Step 1: Parse SRT subtitles once
     cues, adjusted_video_ms = parse_srt_file(srt_file, total_video_ms)
@@ -1232,15 +1238,16 @@ def run_sequential_multi_language_pipeline(
 
         results_by_language[lang_name] = str(lang_out_wav)
         lang_elapsed = time.time() - lang_start
+        log_pipeline_event(f"Completed language [{lang_name}]: {lang_out_wav.name} ({lang_elapsed:.1f}s)")
         print(f"🎉 [LANGUAGE {lang_idx + 1}/{num_langs} COMPLETE] Finished {lang_name} in {lang_elapsed:.1f}s ({lang_elapsed/60:.2f} mins).\n")
 
     # Clean overall temporary working directory
     shutil.rmtree(work_dir, ignore_errors=True)
 
-    if progress_callback:
-        progress_callback(1.0, desc="🏆 All Selected Languages Dubbed & Merged Successfully!")
+    safe_report_progress(progress_callback, 1.0, desc="🏆 All Selected Languages Dubbed & Merged Successfully!")
 
     total_time = time.time() - pipeline_start
+    log_pipeline_event(f"Pipeline finished: {len(results_by_language)} languages dubbed in {total_time:.1f}s")
     return {
         "results": results_by_language,
         "elapsed_seconds": total_time,
@@ -1251,11 +1258,185 @@ def run_sequential_multi_language_pipeline(
 
 
 # ==================================================================================================
-# 10. CLEAN MINIMALIST GRADIO WEB UI (EXACTLY 4 INPUTS)
+# 10. PERSISTENT STORAGE HELPERS & SESSION-INDEPENDENT FILE BROWSER
+# ==================================================================================================
+OUTPUT_BASE_DIR = Path("./outputs").resolve()
+OUTPUT_BASE_DIR.mkdir(parents=True, exist_ok=True)
+PIPELINE_LOG_FILE = OUTPUT_BASE_DIR / "pipeline_execution.log"
+
+
+def log_pipeline_event(msg: str):
+    """Appends a timestamped log entry to persistent pipeline log."""
+    try:
+        OUTPUT_BASE_DIR.mkdir(parents=True, exist_ok=True)
+        ts_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(PIPELINE_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"[{ts_str}] {msg}\n")
+    except Exception:
+        pass
+
+
+def safe_report_progress(progress_callback, val: float, desc: str = ""):
+    """Safely invokes Gradio progress callback without crashing if frontend websocket disconnects."""
+    if progress_callback is None:
+        return
+    try:
+        progress_callback(val, desc=desc)
+    except Exception:
+        # Browser closed, tab refreshed, or websocket dropped; safely continue background task
+        pass
+
+
+def get_persisted_output_files() -> List[Path]:
+    """Scans ./outputs/ recursively for generated master audio/video files, sorted newest first."""
+    OUTPUT_BASE_DIR.mkdir(parents=True, exist_ok=True)
+    valid_exts = {".wav", ".mp3", ".mp4", ".m4a", ".flac", ".ogg"}
+    files: List[Path] = []
+
+    try:
+        for p in OUTPUT_BASE_DIR.rglob("*"):
+            if p.is_file() and p.suffix.lower() in valid_exts:
+                name_lower = p.name.lower()
+                # Ignore temporary intermediate chunk slices
+                if not any(token in name_lower for token in ["chunk", "slice", "temp"]):
+                    files.append(p)
+    except Exception as e:
+        print(f"⚠️ [OUTPUT SCAN] Error scanning outputs directory: {e}")
+
+    files.sort(key=lambda x: x.stat().st_mtime if x.exists() else 0, reverse=True)
+    return files
+
+
+def format_file_size(size_bytes: int) -> str:
+    """Formats file size into human-readable string."""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    else:
+        return f"{size_bytes / (1024 * 1024):.2f} MB"
+
+
+def get_audio_duration_str(file_path: Path) -> str:
+    """Extracts duration from audio file safely."""
+    try:
+        info = sf.info(str(file_path))
+        dur_sec = int(info.duration)
+        return f"{dur_sec // 60:02d}:{dur_sec % 60:02d}"
+    except Exception:
+        return "--:--"
+
+
+def generate_file_browser_state():
+    """
+    Scans persistent output directory and prepares data for Gradio components:
+    - Markdown table of all files
+    - Dropdown choices
+    - Selected file audio preview
+    - Selected file download
+    - All files multi-download
+    - Recent log activity summary
+    """
+    files = get_persisted_output_files()
+    dropdown_update_empty = gr.update(choices=[], value=None) if (GRADIO_AVAILABLE and gr is not None) else []
+    if not files:
+        empty_md = """
+<div class="status-card" style="text-align: center; padding: 24px;">
+    <h4>📭 No output files found in <code>./outputs/</code></h4>
+    <p style="color: #94a3b8; font-size: 0.95rem; margin-top: 6px;">
+        Generate your first dubbed master in the <b>🎙️ Dubbing Studio</b> tab.<br>
+        All completed files are permanently saved to disk and will appear here across sessions.
+    </p>
+</div>
+"""
+        return (
+            empty_md,
+            dropdown_update_empty,
+            None,
+            None,
+            None,
+            "No activity recorded yet in pipeline log.",
+        )
+
+    rows = []
+    for f in files:
+        try:
+            stat = f.stat()
+            size_str = format_file_size(stat.st_size)
+            mtime_str = datetime.datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+            dur_str = get_audio_duration_str(f)
+            rows.append(f"| `{f.name}` | **{size_str}** | `{dur_str}` | `{mtime_str}` |")
+        except Exception:
+            continue
+
+    table_md = f"""
+### 📁 Available Master Outputs ({len(files)} files in `./outputs/`)
+
+| File Name | File Size | Audio Duration | Generated At |
+| :--- | :--- | :--- | :--- |
+""" + "\n".join(rows) + """
+
+*All files above are permanently stored on disk and remain accessible even after tab refreshes or browser restarts.*
+"""
+
+    filenames = [f.name for f in files]
+    first_file = str(files[0].resolve()) if files else None
+    all_filepaths = [str(f.resolve()) for f in files]
+    dropdown_update = gr.update(choices=filenames, value=filenames[0] if filenames else None) if (GRADIO_AVAILABLE and gr is not None) else filenames
+
+    job_summary = "No recent logs recorded."
+    if PIPELINE_LOG_FILE.exists():
+        try:
+            with open(PIPELINE_LOG_FILE, "r", encoding="utf-8") as lf:
+                lines = [l.strip() for l in lf.readlines() if l.strip()]
+                if lines:
+                    last_few = lines[-6:]
+                    job_summary = "\n".join([f"- `{l}`" for l in last_few])
+        except Exception:
+            pass
+
+    return (
+        table_md,
+        dropdown_update,
+        first_file,
+        first_file,
+        all_filepaths,
+        job_summary,
+    )
+
+
+def on_dropdown_file_selected(selected_filename: str):
+    """Handler when user selects a file from the dropdown in File Browser."""
+    if not selected_filename:
+        return None, None
+    files = get_persisted_output_files()
+    for f in files:
+        if f.name == selected_filename:
+            path_str = str(f.resolve())
+            return path_str, path_str
+    return None, None
+
+
+def clear_output_files():
+    """Removes all generated audio output files from ./outputs/."""
+    files = get_persisted_output_files()
+    removed_count = 0
+    for f in files:
+        try:
+            f.unlink()
+            removed_count += 1
+        except Exception:
+            pass
+    log_pipeline_event(f"User cleared {removed_count} output files from ./outputs/")
+    return generate_file_browser_state()
+
+
+# ==================================================================================================
+# 11. CLEAN MINIMALIST GRADIO WEB UI (FIRE & FORGET + FILE BROWSER)
 # ==================================================================================================
 CUSTOM_CSS = """
 .gradio-container {
-    max-width: 840px !important;
+    max-width: 860px !important;
     margin: 0 auto !important;
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif !important;
 }
@@ -1266,7 +1447,7 @@ CUSTOM_CSS = """
     background: linear-gradient(135deg, #181824 0%, #101018 100%);
     border-radius: 16px;
     border: 1px solid rgba(255, 140, 0, 0.25);
-    margin-bottom: 22px;
+    margin-bottom: 18px;
     box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
 }
 
@@ -1282,6 +1463,25 @@ CUSTOM_CSS = """
 .studio-subtitle {
     font-size: 0.95rem;
     color: #94a3b8;
+}
+
+.fire-forget-banner {
+    padding: 12px 18px;
+    border-radius: 10px;
+    background: rgba(30, 41, 59, 0.75);
+    border-left: 4px solid #ff8c00;
+    margin-bottom: 18px;
+    font-size: 0.92rem;
+    color: #cbd5e1;
+    line-height: 1.5;
+}
+
+.file-browser-card {
+    padding: 16px 20px;
+    border-radius: 12px;
+    background: rgba(255, 140, 0, 0.04);
+    border: 1px solid rgba(255, 140, 0, 0.2);
+    margin-bottom: 16px;
 }
 
 .btn-start {
@@ -1300,6 +1500,19 @@ CUSTOM_CSS = """
 .btn-start:hover {
     transform: translateY(-2px) !important;
     box-shadow: 0 6px 24px rgba(255, 69, 0, 0.55) !important;
+}
+
+.btn-refresh {
+    background: #1e293b !important;
+    border: 1px solid rgba(255, 140, 0, 0.3) !important;
+    color: #ff8c00 !important;
+    font-weight: 600 !important;
+    transition: all 0.2s ease !important;
+}
+
+.btn-refresh:hover {
+    background: rgba(255, 140, 0, 0.15) !important;
+    border-color: #ff8c00 !important;
 }
 
 .status-card {
@@ -1334,8 +1547,10 @@ def gradio_multi_dubbing_handler(
         return "### ⚠️ Please select at least one target language from the checkboxes.", None, None
 
     srt_path = getattr(srt_file_obj, "name", str(srt_file_obj))
-    out_dir = Path(tempfile.gettempdir()) / "hf_dubbed_outputs"
+    out_dir = OUTPUT_BASE_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    log_pipeline_event(f"Received dubbing request from UI: srt='{Path(srt_path).name}', languages={selected_languages}")
 
     try:
         pipeline_output = run_sequential_multi_language_pipeline(
@@ -1375,8 +1590,9 @@ def gradio_multi_dubbing_handler(
 | **Voice Conversion (RVC)** | {rvc_status_str} |
 | **Dialogue Lines Processed** | {pipeline_output["cues_count"]} cues |
 | **Total Processing Time** | **{elapsed:.1f}s** ({elapsed/60:.2f} mins) |
+| **Persistent Storage** | Saved directly to `{out_dir}` |
 
-*You can preview the first language below, or download all dubbed `.wav` files.*
+*All files have been permanently written to disk. You can preview below or access all completed files anytime in the **📁 Output Files & Downloads** tab.*
 """
         return status_markdown, first_audio_path, generated_file_paths
 
@@ -1389,11 +1605,12 @@ An error occurred during execution:
 ```
 *Tip: Ensure your SRT file contains valid timestamps and dialogue.*
 """
+        log_pipeline_event(f"Pipeline execution error: {e}")
         return err_msg, None, None
 
 
 def build_ui():
-    """Constructs the clean, minimal Gradio interface (strictly 4 requested inputs)."""
+    """Constructs the clean, minimal Gradio interface with Fire & Forget background file browser."""
     if not GRADIO_AVAILABLE or gr is None:
         raise RuntimeError(
             "Gradio is not installed in the environment.\n"
@@ -1413,64 +1630,132 @@ def build_ui():
             <div class="studio-header">
                 <div class="studio-title">🎙️ AI Multi-Language Dubbing Studio</div>
                 <div class="studio-subtitle">
-                    Kokoro-82M TTS + RVC Voice Conversion • 2-Hour OOM-Safe Chunking for Hugging Face Spaces
+                    Kokoro-82M TTS + RVC Voice Conversion • 2-Hour OOM-Safe Chunking with Persistent Storage
                 </div>
             </div>
             """
         )
 
-        with gr.Group():
-            # 1. Single SRT file upload
-            srt_input = gr.File(
-                label="1. Translated SRT Subtitles (*.srt)",
-                file_types=[".srt"],
-                file_count="single",
-            )
+        with gr.Tabs() as tabs:
+            # ------------------------------------------------------------------
+            # TAB 1: 🎙️ Dubbing Studio
+            # ------------------------------------------------------------------
+            with gr.Tab("🎙️ Dubbing Studio", id="tab_studio"):
+                gr.HTML(
+                    """
+                    <div class="fire-forget-banner">
+                        ⚡ <b>Fire-and-Forget Background Processing:</b> Output audio files are saved directly to <code>./outputs/</code> on the server. If your browser disconnects, tab refreshes, or is closed, processing continues safely in the background. Completed files remain accessible anytime in the <b>📁 Output Files & Downloads</b> tab.
+                    </div>
+                    """
+                )
 
-            # 2. Video Duration Inputs (Timeline Canvas Setup)
-            gr.Markdown("#### 2. Video Duration (Timeline Canvas Setup)")
-            with gr.Row():
-                h_input = gr.Number(label="Hours", value=0, precision=0, minimum=0)
-                m_input = gr.Number(label="Minutes", value=0, precision=0, minimum=0)
-                s_input = gr.Number(label="Seconds", value=48, precision=0, minimum=0)
+                with gr.Group():
+                    # 1. Single SRT file upload
+                    srt_input = gr.File(
+                        label="1. Translated SRT Subtitles (*.srt)",
+                        file_types=[".srt"],
+                        file_count="single",
+                    )
 
-            # 3. Language Selection Checkboxes (Multiple Choice)
-            gr.Markdown("#### 3. Target Dubbing Languages (Sequential Multi-Language)")
-            lang_checkboxes = gr.CheckboxGroup(
-                choices=list(SUPPORTED_LANGUAGES.keys()),
-                value=["Hindi"],
-                label="Select one or more languages to dub sequentially",
-                info="The pipeline will automatically process each language one after another without crashing.",
-            )
+                    # 2. Video Duration Inputs (Timeline Canvas Setup)
+                    gr.Markdown("#### 2. Video Duration (Timeline Canvas Setup)")
+                    with gr.Row():
+                        h_input = gr.Number(label="Hours", value=0, precision=0, minimum=0)
+                        m_input = gr.Number(label="Minutes", value=0, precision=0, minimum=0)
+                        s_input = gr.Number(label="Seconds", value=48, precision=0, minimum=0)
 
-            # 4. Action Button
-            start_btn = gr.Button(
-                "⚡ Start Dubbing",
-                variant="primary",
-                size="lg",
-                elem_classes="btn-start",
-            )
+                    # 3. Language Selection Checkboxes (Multiple Choice)
+                    gr.Markdown("#### 3. Target Dubbing Languages (Sequential Multi-Language)")
+                    lang_checkboxes = gr.CheckboxGroup(
+                        choices=list(SUPPORTED_LANGUAGES.keys()),
+                        value=["Hindi"],
+                        label="Select one or more languages to dub sequentially",
+                        info="The pipeline will automatically process each language one after another without crashing.",
+                    )
 
-        # Output Section
-        gr.Markdown("### 🎧 Dubbed Master Audio Outputs")
-        status_box = gr.Markdown(
-            """
-            <div class="status-card">
-                <b>Ready to dub.</b> Upload your <code>.srt</code> file, check your desired languages, and click <b>Start Dubbing</b>.
-            </div>
-            """
-        )
-        audio_preview = gr.Audio(
-            label="Audio Preview (First Completed Language)",
-            type="filepath",
-            interactive=False,
-        )
-        download_files = gr.File(
-            label="📥 Download All Dubbed Master Audio Files (.wav)",
-            file_count="multiple",
-        )
+                    # 4. Action Button
+                    start_btn = gr.Button(
+                        "⚡ Start Dubbing",
+                        variant="primary",
+                        size="lg",
+                        elem_classes="btn-start",
+                    )
 
-        # Connect button event
+                # Output Section
+                gr.Markdown("### 🎧 Current Session Master Audio Outputs")
+                status_box = gr.Markdown(
+                    """
+                    <div class="status-card">
+                        <b>Ready to dub.</b> Upload your <code>.srt</code> file, check your desired languages, and click <b>Start Dubbing</b>.
+                    </div>
+                    """
+                )
+                audio_preview = gr.Audio(
+                    label="Audio Preview (First Completed Language)",
+                    type="filepath",
+                    interactive=False,
+                )
+                download_files = gr.File(
+                    label="📥 Download Dubbed Master Audio Files (.wav)",
+                    file_count="multiple",
+                )
+
+            # ------------------------------------------------------------------
+            # TAB 2: 📁 Output Files & Downloads (Session-Independent)
+            # ------------------------------------------------------------------
+            with gr.Tab("📁 Output Files & Downloads", id="tab_outputs"):
+                gr.HTML(
+                    """
+                    <div class="file-browser-card">
+                        <div style="font-size: 1.15rem; font-weight: 700; color: #ff8c00; margin-bottom: 4px;">
+                            📂 Persistent Storage & File Browser
+                        </div>
+                        <div style="color: #94a3b8; font-size: 0.92rem;">
+                            All dubbed master files saved to <code>./outputs/</code> are indexed below. Access, preview, and download your files anytime across browser sessions and tab refreshes.
+                        </div>
+                    </div>
+                    """
+                )
+
+                with gr.Row():
+                    refresh_btn = gr.Button("🔄 Refresh Output Files", variant="secondary", elem_classes="btn-refresh")
+                    clear_btn = gr.Button("🗑️ Clear Output Files", variant="stop", size="sm")
+
+                browser_table = gr.Markdown("Scanning `./outputs/`...")
+
+                gr.Markdown("### 🎧 Audio Preview & Individual Download")
+                with gr.Row():
+                    file_selector = gr.Dropdown(
+                        label="Select File to Preview or Download",
+                        choices=[],
+                        value=None,
+                        interactive=True,
+                    )
+                with gr.Row():
+                    browser_audio_preview = gr.Audio(
+                        label="Selected Audio Preview",
+                        type="filepath",
+                        interactive=False,
+                    )
+                    browser_single_download = gr.File(
+                        label="📥 Download Selected File",
+                        interactive=False,
+                    )
+
+                gr.Markdown("### 📦 Batch Download All Completed Files")
+                browser_batch_download = gr.File(
+                    label="All Completed Output Audio Files (.wav)",
+                    file_count="multiple",
+                    interactive=False,
+                )
+
+                with gr.Accordion("📜 Recent Pipeline Activity Log", open=False):
+                    browser_activity_log = gr.Markdown("No activity recorded yet.")
+
+        # Event connections
+
+        # 1. Main Start Dubbing click event:
+        # Updates studio outputs AND refreshes the file browser outputs so both tabs stay in sync
         start_btn.click(
             fn=gradio_multi_dubbing_handler,
             inputs=[
@@ -1484,6 +1769,66 @@ def build_ui():
                 status_box,
                 audio_preview,
                 download_files,
+            ],
+        ).then(
+            fn=generate_file_browser_state,
+            inputs=[],
+            outputs=[
+                browser_table,
+                file_selector,
+                browser_audio_preview,
+                browser_single_download,
+                browser_batch_download,
+                browser_activity_log,
+            ],
+        )
+
+        # 2. Refresh button in File Browser
+        refresh_btn.click(
+            fn=generate_file_browser_state,
+            inputs=[],
+            outputs=[
+                browser_table,
+                file_selector,
+                browser_audio_preview,
+                browser_single_download,
+                browser_batch_download,
+                browser_activity_log,
+            ],
+        )
+
+        # 3. File selector dropdown change
+        file_selector.change(
+            fn=on_dropdown_file_selected,
+            inputs=[file_selector],
+            outputs=[browser_audio_preview, browser_single_download],
+        )
+
+        # 4. Clear output files button
+        clear_btn.click(
+            fn=clear_output_files,
+            inputs=[],
+            outputs=[
+                browser_table,
+                file_selector,
+                browser_audio_preview,
+                browser_single_download,
+                browser_batch_download,
+                browser_activity_log,
+            ],
+        )
+
+        # 5. Automatically populate file browser state on initial page load / refresh
+        demo.load(
+            fn=generate_file_browser_state,
+            inputs=[],
+            outputs=[
+                browser_table,
+                file_selector,
+                browser_audio_preview,
+                browser_single_download,
+                browser_batch_download,
+                browser_activity_log,
             ],
         )
 
