@@ -19,7 +19,7 @@
 | `infer-rvc-python` | latest | RVC engine | **fairseq-FREE** — no compile hang |
 | `pyworld-prebuilt` | latest | Pitch tools | Pre-built binary — no Cython compile |
 | `onnxruntime-gpu` | latest | RMVPE on CUDA | T4 GPU accelerated |
-| `faiss-gpu-cu12` | latest | Index search | CUDA 12 T4 wheel |
+| `faiss-cpu` | latest | Index search | NumPy < 2.0 safe |
 | `kokoro` | latest | Kokoro-82M TTS | Local, zero API keys |
 | `hydra-core` + `omegaconf` | latest | RVC config | Pure Python |
 | `antlr4-python3-runtime` | `==4.9.3` | Grammar parser | Version-pinned |

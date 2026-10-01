@@ -1085,18 +1085,23 @@ _RVC_IMPORT_PATHS = [
     ("rvc_python.infer",       "RVCInference"),   # ← legacy fallback if already installed
 ]
 
-def _try_import_rvc() -> bool:
+def _try_import_rvc(verbose: bool = False) -> bool:
     """Attempts to import RVCInference from either infer_rvc_python or rvc_python."""
     global RVCInference, RVC_AVAILABLE
+    import importlib
+    importlib.invalidate_caches()
     for module_path, class_name in _RVC_IMPORT_PATHS:
         try:
-            import importlib
             mod = importlib.import_module(module_path)
             RVCInference = getattr(mod, class_name)
             RVC_AVAILABLE = True
             print(f"✅ [RVC] Loaded RVCInference from '{module_path}'.")
             return True
-        except Exception:
+        except Exception as e:
+            if verbose:
+                import traceback
+                print(f"⚠️ [RVC IMPORT ATTEMPT] '{module_path}' import failed: {e}")
+                traceback.print_exc()
             continue
     return False
 
@@ -1105,6 +1110,7 @@ def ensure_rvc_dependencies() -> bool:
     """
     Ensures infer-rvc-python (fairseq-FREE RVC fork) is installed and importable.
     - NO fairseq compilation → NO hang.
+    - Uses faiss-cpu to strictly avoid NumPy 2.x ABI conflicts on Colab.
     - Exposes full stack traces on failure (no silent fallbacks).
     - Thread-safe.
     """
@@ -1122,30 +1128,28 @@ def ensure_rvc_dependencies() -> bool:
         _patch_tensorboard_for_fairseq()
 
         # ── Attempt 1: Direct import (already installed) ───────────────────────
-        if _try_import_rvc():
+        if _try_import_rvc(verbose=False):
             return True
 
         import traceback as _tb
         print("\n💡 [RVC PROBE] No RVC library found. Installing infer-rvc-python (fairseq-free)...")
 
         # ── Attempt 2: pip install infer-rvc-python (clean, no C++ compile) ────
-        faiss_pkg = "faiss-gpu-cu12" if (
-            torch and torch.cuda.is_available() and IS_COLAB
-        ) else "faiss-cpu"
+        # CRITICAL: Always use faiss-cpu. faiss-gpu-cu12 forces numpy>=2.0 which breaks RVC/Numba.
         pip_env = os.environ.copy()
         pip_env["NO_CUDA"] = "1"   # suppress any residual CUDA kernel compilation
 
         install_steps = [
-            # Step A: numpy pin + build tools + pyworld pre-built wheel
+            # Step A: numpy pin + build tools + pyworld pre-built wheel (no C++ compile)
             [sys.executable, "-m", "pip", "install", "-q",
-             "numpy<2.0.0", "cython", "setuptools", "wheel", "pyworld-prebuilt"],
-            # Step B: infer-rvc-python — fairseq-free, pure-wheel install
+             "numpy<2.0.0", "cython", "setuptools", "wheel", "pyworld-prebuilt", "--prefer-binary"],
+            # Step B: infer-rvc-python — fairseq-free, prefer binary wheel
             [sys.executable, "-m", "pip", "install", "-q", "--prefer-binary",
              "infer-rvc-python"],
-            # Step C: GPU utilities
+            # Step C: faiss-cpu (FAISS is only for KNN index search, CPU is fast and keeps numpy<2.0)
             [sys.executable, "-m", "pip", "install", "-q", "--prefer-binary",
-             faiss_pkg, "onnxruntime-gpu"],
-            # Step D: RVC sub-deps
+             "faiss-cpu", "onnxruntime-gpu"],
+            # Step D: RVC sub-deps (pure Python, no compile)
             [sys.executable, "-m", "pip", "install", "-q",
              "hydra-core", "omegaconf", "antlr4-python3-runtime==4.9.3",
              "soundfile", "pydub"],
@@ -1166,19 +1170,20 @@ def ensure_rvc_dependencies() -> bool:
         _patch_fairseq_registry()
         _patch_tensorboard_for_fairseq()
 
-        # ── Attempt 3: Import after install ───────────────────────────────────
-        if _try_import_rvc():
+        # ── Attempt 3: Import after install (with full verbose trace if failing) ─
+        if _try_import_rvc(verbose=True):
             return True
 
         # ── Final: Loud failure — full traceback exposed ───────────────────────
         print("\n" + "!" * 80)
         print("🚨 [RVC IMPORT FAILURE] infer-rvc-python could not be loaded after install!")
-        print("   Run Step 2 of the Colab notebook, then Runtime → Restart runtime → Step 3.")
+        print("   If running in Colab, please do: Runtime → Restart runtime → Re-run cell.")
         print("!" * 80 + "\n")
         raise RuntimeError(
             "RVC engine (infer-rvc-python) failed to initialize. "
-            "Re-run the Colab Step-2 install cell and restart the runtime."
+            "Please restart the Colab runtime and run the all-in-one cell again."
         )
+
 
 
 
