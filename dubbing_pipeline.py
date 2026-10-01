@@ -43,6 +43,7 @@ import tempfile
 import zipfile
 import urllib.request
 import subprocess
+import threading
 from pathlib import Path
 from typing import List, Tuple, Dict, Any, Optional
 
@@ -769,43 +770,56 @@ def synthesize_single_cue_kokoro(
 # ==================================================================================================
 # 6. RVC VOICE CONVERSION ENGINE (RMVPE PITCH EXTRACTION)
 # ==================================================================================================
+_RVC_LOCK = threading.Lock()
+
 def ensure_rvc_dependencies() -> bool:
     """
     Ensures rvc-python is installed and importable.
     Uses --no-deps to bypass omegaconf/hydra-core dependency resolver conflicts on Hugging Face Spaces.
+    Thread-safe and provides clear diagnostic logging.
     """
     global RVCInference, RVC_AVAILABLE
     if RVC_AVAILABLE and RVCInference is not None:
         return True
 
-    try:
-        _patch_tensorboard_for_fairseq()
-        from rvc_python.infer import RVCInference as _RVCClass  # type: ignore
-        RVCInference = _RVCClass
-        RVC_AVAILABLE = True
-        return True
-    except (ImportError, ModuleNotFoundError):
-        print("⚡ [RVC SETUP] 'rvc_python' not found in environment. Installing with --no-deps (bypassing omegaconf conflict)...")
+    with _RVC_LOCK:
+        if RVC_AVAILABLE and RVCInference is not None:
+            return True
+
+        # Attempt 1: Direct import
+        try:
+            _patch_tensorboard_for_fairseq()
+            from rvc_python.infer import RVCInference as _RVCClass  # type: ignore
+            RVCInference = _RVCClass
+            RVC_AVAILABLE = True
+            return True
+        except Exception as import_err:
+            print(f"💡 [RVC PROBE] Initial rvc_python import probe notice: {import_err}")
+
+        # Attempt 2: Auto-install with --no-deps for Hugging Face Spaces / Linux
+        print("⚡ [RVC SETUP] Installing RVC runtime modules with --no-deps (bypassing omegaconf conflict)...")
         install_commands = [
             [sys.executable, "-m", "pip", "install", "-q", "--no-deps", "fairseq-fixed", "pyworld-fixed", "rvc-python"],
             [sys.executable, "-m", "pip", "install", "-q", "--no-deps", "rvc-python"],
+            [sys.executable, "-m", "pip", "install", "-q", "scipy"],
         ]
         for cmd in install_commands:
             try:
+                cmd_str = " ".join(cmd[3:])
+                print(f"📦 [RVC SETUP] Running: pip {cmd_str}")
                 subprocess.run(cmd, check=True)
                 _patch_tensorboard_for_fairseq()
                 from rvc_python.infer import RVCInference as _RVCClass  # type: ignore
                 RVCInference = _RVCClass
                 RVC_AVAILABLE = True
-                print("✅ [RVC SETUP] 'rvc-python' installed with --no-deps and verified successfully!")
+                print("✅ [RVC SETUP] 'rvc-python' installed and verified successfully!")
                 return True
-            except Exception:
+            except Exception as cmd_err:
+                print(f"💡 [RVC SETUP NOTICE] {cmd_err}")
                 continue
 
-    except Exception as e:
-        print(f"💡 [RVC NOTICE] Could not load RVC ({e}). Falling back to base Kokoro TTS.")
-
-    return False
+        print("💡 [RVC NOTICE] RVC dependencies could not be loaded in current environment (CPU/Windows missing C++ wheels). Falling back to base Kokoro TTS.")
+        return False
 
 
 class CharacterVoiceConverter:

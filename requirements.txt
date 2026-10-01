@@ -5,6 +5,7 @@ soundfile>=0.12.1
 librosa>=0.10.1
 numpy
 scipy
+setuptools
 
 # Kokoro-82M Local Neural TTS (100% Local, Offline, No API Keys)
 kokoro
