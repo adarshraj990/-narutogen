@@ -767,6 +767,45 @@ def synthesize_single_cue_kokoro(
 # ==================================================================================================
 # 6. RVC VOICE CONVERSION ENGINE (RMVPE PITCH EXTRACTION)
 # ==================================================================================================
+def ensure_rvc_dependencies() -> bool:
+    """
+    Ensures rvc-python is installed and importable.
+    Uses --no-deps to bypass omegaconf/hydra-core dependency resolver conflicts on Hugging Face Spaces.
+    """
+    global RVCInference, RVC_AVAILABLE
+    if RVC_AVAILABLE and RVCInference is not None:
+        return True
+
+    try:
+        _patch_tensorboard_for_fairseq()
+        from rvc_python.infer import RVCInference as _RVCClass  # type: ignore
+        RVCInference = _RVCClass
+        RVC_AVAILABLE = True
+        return True
+    except (ImportError, ModuleNotFoundError):
+        print("⚡ [RVC SETUP] 'rvc_python' not found in environment. Installing with --no-deps (bypassing omegaconf conflict)...")
+        install_commands = [
+            [sys.executable, "-m", "pip", "install", "-q", "--no-deps", "fairseq-fixed", "pyworld-fixed", "rvc-python"],
+            [sys.executable, "-m", "pip", "install", "-q", "--no-deps", "rvc-python"],
+        ]
+        for cmd in install_commands:
+            try:
+                subprocess.run(cmd, check=True)
+                _patch_tensorboard_for_fairseq()
+                from rvc_python.infer import RVCInference as _RVCClass  # type: ignore
+                RVCInference = _RVCClass
+                RVC_AVAILABLE = True
+                print("✅ [RVC SETUP] 'rvc-python' installed with --no-deps and verified successfully!")
+                return True
+            except Exception:
+                continue
+
+    except Exception as e:
+        print(f"💡 [RVC NOTICE] Could not load RVC ({e}). Falling back to base Kokoro TTS.")
+
+    return False
+
+
 class CharacterVoiceConverter:
     """Handles RVC voice conversion using pre-trained .pth weights and .index files."""
 
@@ -832,34 +871,7 @@ class CharacterVoiceConverter:
         """Initializes the RVC engine with GPU acceleration."""
         global RVCInference, RVC_AVAILABLE
         print(f"\n🎙️ [STEP 2: RVC] Initializing RVC Engine with model: {Path(self.model_path).name}...")
-        if not RVC_AVAILABLE or RVCInference is None:
-            try:
-                _patch_tensorboard_for_fairseq()
-                from rvc_python.infer import RVCInference as _RVCClass  # type: ignore
-                RVCInference = _RVCClass
-                RVC_AVAILABLE = True
-            except (ImportError, ModuleNotFoundError):
-                print("⚡ [RVC SETUP] 'rvc_python' not found in environment. Auto-installing 'rvc-python' now...")
-                try:
-                    subprocess.run(
-                        [sys.executable, "-m", "pip", "install", "-q", "rvc-python", "torchcrepe", "faiss-cpu"],
-                        check=True,
-                    )
-                    _patch_tensorboard_for_fairseq()
-                    from rvc_python.infer import RVCInference as _RVCClass  # type: ignore
-                    RVCInference = _RVCClass
-                    RVC_AVAILABLE = True
-                    print("✅ [RVC SETUP] 'rvc-python' installed and verified successfully!")
-                except Exception as install_err:
-                    print(f"💡 [RVC NOTICE] Auto-install of 'rvc-python' failed ({install_err}). Falling back to base Kokoro TTS.")
-                    self.engine = None
-                    return
-            except Exception as e:
-                print(f"💡 [RVC NOTICE] 'rvc-python' could not be loaded ({e}). Falling back to base Kokoro TTS.")
-                self.engine = None
-                return
-
-        if RVCInference is None or not callable(RVCInference):
+        if not ensure_rvc_dependencies():
             print("⚠️ [RVC LOAD ERROR] RVCInference is unavailable. Falling back to baseline TTS.")
             self.engine = None
             return

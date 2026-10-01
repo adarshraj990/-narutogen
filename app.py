@@ -106,7 +106,14 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from dubbing_pipeline import build_ui, CONFIGURED_RVC_MODEL_URL, launch_gradio_app
+import threading
+from dubbing_pipeline import build_ui, CONFIGURED_RVC_MODEL_URL, launch_gradio_app, ensure_rvc_dependencies
+
+# Proactively warm up RVC dependencies in background on startup
+try:
+    threading.Thread(target=ensure_rvc_dependencies, daemon=True).start()
+except Exception:
+    pass
 
 # Hugging Face Spaces detects demo at module level
 demo = build_ui()
