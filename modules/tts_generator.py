@@ -393,6 +393,7 @@ def generate_base_speech(
 
 # Compatibility aliases for legacy runners
 parse_srt_file = parse_srt
+parse_srt_safely = parse_srt
 SUPPORTED_VOICES = KOKORO_VOICES
 resolve_voice_name = resolve_kokoro_voice
 

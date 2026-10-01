@@ -688,6 +688,10 @@ def parse_srt_file(srt_path: str, total_video_ms: int) -> Tuple[List[SubtitleCue
     return cues, adjusted_video_ms
 
 
+# Backwards compatibility and external caller alias
+parse_srt_safely = parse_srt_file
+
+
 # ==================================================================================================
 # 5. KOKORO-82M LOCAL TTS ENGINE (MULTI-LANGUAGE, ZERO EDGE-TTS)
 # ==================================================================================================

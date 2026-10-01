@@ -3,7 +3,9 @@ NarutoGen Audio Pipeline Modules
 """
 from .tts_generator import (
     generate_base_speech,
+    parse_srt,
     parse_srt_file,
+    parse_srt_safely,
     SubtitleCue,
     SUPPORTED_VOICES,
     resolve_voice_name,
@@ -22,7 +24,9 @@ from .model_downloader import (
 
 __all__ = [
     "generate_base_speech",
+    "parse_srt",
     "parse_srt_file",
+    "parse_srt_safely",
     "SubtitleCue",
     "SUPPORTED_VOICES",
     "resolve_voice_name",
