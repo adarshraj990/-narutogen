@@ -197,14 +197,10 @@ def _patch_fairseq_registry():
     In FairSeq's registry.py, setup_registry returns None when a registry is re-evaluated,
     which crashes callers expecting a 4-tuple (build_x, register_x, REGISTRY, DATACLASS_REGISTRY).
     """
-    # 1. Clear any in-memory partially loaded registries
-    if "fairseq.registry" in sys.modules:
-        reg_mod = sys.modules["fairseq.registry"]
-        if hasattr(reg_mod, "REGISTRIES") and isinstance(reg_mod.REGISTRIES, dict):
-            try:
-                reg_mod.REGISTRIES.clear()
-            except Exception:
-                pass
+    # 1. Clear any partially loaded fairseq modules so re-import starts clean
+    for mod_name in list(sys.modules.keys()):
+        if mod_name == "fairseq" or mod_name.startswith("fairseq."):
+            sys.modules.pop(mod_name, None)
 
     # 2. Patch registry.py on disk across all site-packages directories
     candidate_paths = []
@@ -223,41 +219,39 @@ def _patch_fairseq_registry():
                 with open(reg_path, "r", encoding="utf-8") as f:
                     content = f.read()
 
-                bad_code = "if registry_name in REGISTRIES:\n        return  # registry already exists"
-                good_code = (
-                    "if registry_name in REGISTRIES:\n"
+                # Clean up any bad previous patch if present
+                if '"build_x": build_x' in content:
+                    content = content.replace('"build_x": build_x,\n        "register_x": register_x,\n', '')
+
+                old_check = "if registry_name in REGISTRIES:\n        return  # registry already exists"
+                new_check = (
+                    "if registry_name in REGISTRIES and 'build_x' in REGISTRIES[registry_name]:\n"
                     "        entry = REGISTRIES[registry_name]\n"
-                    "        return entry.get('build_x'), entry.get('register_x'), entry.get('registry', {}), entry.get('dataclass_registry', {})"
+                    "        return entry['build_x'], entry['register_x'], entry['registry'], entry['dataclass_registry']\n"
+                    "    if registry_name in REGISTRIES:\n"
+                    "        entry = REGISTRIES[registry_name]\n"
+                    "        return entry.get('build_x', lambda *a, **k: None), entry.get('register_x', lambda *a, **k: None), entry.get('registry', {}), entry.get('dataclass_registry', {})"
                 )
-                bad_store = (
-                    'REGISTRIES[registry_name] = {\n'
-                    '        "registry": REGISTRY,\n'
-                    '        "default": default,\n'
-                    '        "dataclass_registry": DATACLASS_REGISTRY,\n'
-                    '    }'
-                )
-                good_store = (
-                    'REGISTRIES[registry_name] = {\n'
-                    '        "registry": REGISTRY,\n'
-                    '        "default": default,\n'
-                    '        "dataclass_registry": DATACLASS_REGISTRY,\n'
-                    '        "build_x": build_x,\n'
-                    '        "register_x": register_x,\n'
-                    '    }'
+
+                old_ret = "return build_x, register_x, REGISTRY, DATACLASS_REGISTRY"
+                new_ret = (
+                    "REGISTRIES[registry_name]['build_x'] = build_x\n"
+                    "    REGISTRIES[registry_name]['register_x'] = register_x\n"
+                    "    return build_x, register_x, REGISTRY, DATACLASS_REGISTRY"
                 )
 
                 modified = False
-                if bad_code in content:
-                    content = content.replace(bad_code, good_code)
+                if old_check in content:
+                    content = content.replace(old_check, new_check)
                     modified = True
-                if bad_store in content:
-                    content = content.replace(bad_store, good_store)
+                if old_ret in content and "REGISTRIES[registry_name]['build_x'] = build_x" not in content:
+                    content = content.replace(old_ret, new_ret)
                     modified = True
 
                 if modified:
                     with open(reg_path, "w", encoding="utf-8") as f:
                         f.write(content)
-                    print(f"🔧 [FAIRSEQ PATCH] Patched {reg_path} to prevent NoneType unpacking crash.")
+                    print(f"🔧 [FAIRSEQ PATCH] Successfully patched {reg_path} to prevent unpacking and unbound variable crashes.")
             except Exception:
                 pass
 
@@ -897,7 +891,9 @@ def ensure_rvc_dependencies() -> bool:
             print("✅ [RVC SETUP] 'rvc-python' installed and verified successfully!")
             return True
         except Exception as cmd_err:
+            import traceback
             print(f"💡 [RVC SETUP NOTICE] {cmd_err}")
+            traceback.print_exc()
 
         print("💡 [RVC NOTICE] RVC dependencies could not be loaded in current environment (CPU/Windows missing C++ wheels). Falling back to base Kokoro TTS.")
         return False
