@@ -158,8 +158,8 @@ def clean_dialogue_text(text: str) -> str:
     """Cleans dialogue text by stripping HTML tags, subtitle formatting, and sound effect annotations."""
     if not text:
         return ""
-    # Strip HTML tags
-    clean = re.sub(r"<[^>]+>", "", text)
+    # Strip HTML / XML tags including empty tags <>
+    clean = re.sub(r"<[^>]*>", "", text)
     # Strip sound effect annotations e.g. [laughs], (music)
     clean = re.sub(r"\[.*?\]", "", clean)
     clean = re.sub(r"\(.*?\)", "", clean)
@@ -212,48 +212,81 @@ def read_text_safely(file_path: str) -> str:
 
 
 def parse_srt(srt_path: str) -> List[SubtitleCue]:
-    """Parses SRT file into SubtitleCue objects with fail-safe handling against malformed blocks."""
-    cues = []
-    if PYSRT_AVAILABLE and pysrt:
-        try:
-            subs = pysrt.open(srt_path, encoding="utf-8")
-            for i, sub in enumerate(subs, start=1):
-                try:
-                    clean_txt = clean_dialogue_text(getattr(sub, "text", ""))
-                    if not clean_txt:
-                        continue
-                    start_ms = int(getattr(sub.start, "ordinal", 0))
-                    end_ms = int(getattr(sub.end, "ordinal", start_ms + 1000))
-                    if end_ms <= start_ms:
-                        end_ms = start_ms + 1000
-                    cues.append(SubtitleCue(cue_id=i, start_ms=start_ms, end_ms=end_ms, text=clean_txt))
-                except Exception:
-                    continue
-            if cues:
-                return cues
-        except Exception:
-            pass
+    """
+    Bulletproof SRT subtitle parser:
+    1. Opens the file strictly with encoding='utf-8'.
+    2. Splits the text into blocks and validates that each block has at least 3 lines
+       before attempting to extract the index, timestamp, and dialogue.
+    3. Wraps the block extraction in a try...except block. If a block is malformed
+       or lacks text, simply continues (skips it) instead of crashing.
+    4. The pipeline never crashes due to a formatting error in a single subtitle line.
+    """
+    print(f"📄 [SRT] Parsing subtitles from: {srt_path}")
+    cues: List[SubtitleCue] = []
 
-    # Pure-Python universal regex scanner fallback
-    raw_content = read_text_safely(srt_path).replace("\r\n", "\n").replace("\r", "\n")
-    ts_pattern = re.compile(
-        r"(?:(?<=\n)|^)\s*(?:(\d+)\s*\n)?\s*(\d{1,2}:\d{2}:\d{2}[,\.]\d{1,3})\s*-->\s*(\d{1,2}:\d{2}:\d{2}[,\.]\d{1,3})[^\n]*\n([\s\S]*?)(?=(?:\n\s*(?:\d+\s*\n)?\s*\d{1,2}:\d{2}:\d{2}[,\.]\d{1,3}\s*-->)|\Z)"
-    )
-    for i, match in enumerate(ts_pattern.finditer(raw_content), start=1):
+    # 1. Open the file strictly with encoding='utf-8'
+    content = ""
+    try:
+        with open(srt_path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except UnicodeDecodeError:
+        with open(srt_path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+    except Exception as e:
+        print(f"⚠️ [SRT READ ERROR] {e}")
+        return cues
+
+    content = content.replace("\r\n", "\n").replace("\r", "\n")
+
+    # 2. Split into blocks separated by blank lines
+    blocks = re.split(r"\n\s*\n", content.strip())
+
+    cue_counter = 1
+    for block in blocks:
+        # 3. Wrap block extraction in a try...except block
         try:
-            raw_idx = match.group(1)
-            cue_id = int(raw_idx) if raw_idx and raw_idx.isdigit() else i
-            start_ms = parse_timestamp_ms(match.group(2))
-            end_ms = parse_timestamp_ms(match.group(3))
-            text_part = clean_dialogue_text(match.group(4))
-            if not text_part:
+            raw_lines = [l.strip() for l in block.split("\n") if l.strip()]
+
+            # Validate that each block has at least 3 lines before attempting extraction
+            if len(raw_lines) < 3:
                 continue
+
+            idx_line = raw_lines[0]
+            ts_line = raw_lines[1]
+            dialogue_lines = raw_lines[2:]
+
+            # Validate timestamp line contains -->
+            if "-->" not in ts_line:
+                continue
+
+            ts_parts = ts_line.split("-->")
+            if len(ts_parts) < 2:
+                continue
+
+            start_ms = parse_timestamp_ms(ts_parts[0])
+            end_ms = parse_timestamp_ms(ts_parts[1])
+
+            # Extract dialogue text and clean tags/formatting
+            raw_dialogue = " ".join(dialogue_lines)
+            clean_txt = clean_dialogue_text(raw_dialogue)
+
+            # If dialogue is missing or only contained stripped tags, skip it
+            if not clean_txt:
+                continue
+
+            cue_id = int(idx_line) if idx_line.isdigit() else cue_counter
+
             if end_ms <= start_ms:
                 end_ms = start_ms + 1000
-            cues.append(SubtitleCue(cue_id=cue_id, start_ms=start_ms, end_ms=end_ms, text=text_part))
+
+            cues.append(SubtitleCue(cue_id=cue_id, start_ms=start_ms, end_ms=end_ms, text=clean_txt))
+            cue_counter += 1
+
         except Exception:
+            # Skip any malformed block seamlessly without crashing
             continue
 
+    print(f"✅ [SRT] Successfully loaded {len(cues)} valid dialogue cues.")
     return cues
 
 
