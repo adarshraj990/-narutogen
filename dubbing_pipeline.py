@@ -837,13 +837,77 @@ def synthesize_single_cue_kokoro(
 # ==================================================================================================
 # 6. RVC VOICE CONVERSION ENGINE (RMVPE PITCH EXTRACTION)
 # ==================================================================================================
+def ensure_rvc_base_models(lib_dir: Optional[str] = None) -> bool:
+    """
+    Pre-flight check (Requirement 2): Guarantees that hubert_base.pt and rmvpe.pt exist
+    and are valid non-empty files before RVC engine initialization.
+    Uses chunked streaming downloads with automatic directory discovery.
+    """
+    import requests
+    if lib_dir is None:
+        try:
+            import rvc_python
+            lib_dir = os.path.dirname(os.path.abspath(rvc_python.__file__))
+        except Exception:
+            lib_dir = "rvc_python"
+
+    base_model_dir = Path(lib_dir) / "base_model"
+    base_model_dir.mkdir(parents=True, exist_ok=True)
+
+    required_assets = {
+        "hubert_base.pt": {
+            "url": "https://huggingface.co/Daswer123/RVC_Base/resolve/main/hubert_base.pt",
+            "min_size": 40_000_000,  # Expected ~185 MB
+        },
+        "rmvpe.pt": {
+            "url": "https://huggingface.co/Daswer123/RVC_Base/resolve/main/rmvpe.pt",
+            "min_size": 10_000_000,  # Expected ~40 MB
+        },
+        "rmvpe.onnx": {
+            "url": "https://huggingface.co/Daswer123/RVC_Base/resolve/main/rmvpe.onnx",
+            "min_size": 5_000_000,
+        },
+    }
+
+    print("\n🔍 [RVC PRE-FLIGHT] Verifying core base model assets in:", base_model_dir)
+    for filename, meta in required_assets.items():
+        file_path = base_model_dir / filename
+        needs_download = True
+        if file_path.exists():
+            curr_size = file_path.stat().st_size
+            if curr_size >= meta["min_size"]:
+                print(f"  ✅ [ASSET OK] {filename} ({curr_size / (1024*1024):.1f} MB)")
+                needs_download = False
+            else:
+                print(f"  ⚠️ [ASSET INCOMPLETE] {filename} is only {curr_size} bytes. Re-downloading...")
+
+        if needs_download:
+            print(f"  📥 [DOWNLOAD] Streaming {filename} from Hugging Face...")
+            try:
+                with requests.get(meta["url"], stream=True, timeout=180, allow_redirects=True) as resp:
+                    resp.raise_for_status()
+                    with open(file_path, "wb") as f:
+                        for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                            if chunk:
+                                f.write(chunk)
+                final_size = file_path.stat().st_size
+                print(f"  ✅ [DOWNLOAD COMPLETE] {filename} saved ({final_size / (1024*1024):.1f} MB).")
+            except Exception as dl_err:
+                import traceback
+                print(f"  🚨 [DOWNLOAD FAILED] Could not fetch {filename}: {dl_err}")
+                traceback.print_exc()
+                return False
+
+    return True
+
+
 _RVC_LOCK = threading.Lock()
 
 def ensure_rvc_dependencies() -> bool:
     """
-    Ensures rvc-python is installed and importable.
-    Uses --no-deps to bypass omegaconf/hydra-core dependency resolver conflicts on Hugging Face Spaces.
-    Thread-safe and provides clear diagnostic logging.
+    Ensures rvc-python and dependencies are installed and importable.
+    Enforces Requirement 1: Dependency Hell Resolution.
+    Thread-safe and exposes complete stack traces on failure (Requirement 5).
     """
     global RVCInference, RVC_AVAILABLE
     if RVC_AVAILABLE and RVCInference is not None:
@@ -864,13 +928,15 @@ def ensure_rvc_dependencies() -> bool:
             RVC_AVAILABLE = True
             return True
         except Exception as import_err:
-            print(f"💡 [RVC PROBE] Initial rvc_python import probe notice: {import_err}")
+            import traceback
+            print(f"\n💡 [RVC PROBE] Initial direct import failed ({import_err}). Starting dependency resolution...")
+            traceback.print_exc()
 
-        # Attempt 2: Auto-install with pip (installing fairseq/rvc with --no-deps + hydra-core, omegaconf, antlr4)
-        print("⚡ [RVC SETUP] Installing RVC runtime modules (fairseq, rvc-python, hydra-core, omegaconf)...")
+        # Attempt 2: Auto-install with pip (Requirement 1: Enforce correct versions)
+        print("⚡ [RVC SETUP] Installing RVC runtime modules (Requirement 1)...")
         install_commands = [
             [sys.executable, "-m", "pip", "install", "-q", "--no-deps", "fairseq-fixed", "pyworld-fixed", "rvc-python"],
-            [sys.executable, "-m", "pip", "install", "-q", "antlr4-python3-runtime==4.9.3", "omegaconf", "hydra-core"],
+            [sys.executable, "-m", "pip", "install", "-q", "numpy<2.0.0", "torch", "torchaudio", "faiss-cpu", "hydra-core", "omegaconf", "antlr4-python3-runtime==4.9.3"],
         ]
         for cmd in install_commands:
             cmd_str = " ".join(cmd[3:])
@@ -878,7 +944,9 @@ def ensure_rvc_dependencies() -> bool:
                 print(f"📦 [RVC SETUP] Running: pip {cmd_str}")
                 subprocess.run(cmd, check=True)
             except Exception as cmd_err:
+                import traceback
                 print(f"💡 [RVC SETUP NOTICE] {cmd_err}")
+                traceback.print_exc()
 
         # Apply disk and in-memory patches immediately after pip installation
         _patch_fairseq_registry()
@@ -892,10 +960,12 @@ def ensure_rvc_dependencies() -> bool:
             return True
         except Exception as cmd_err:
             import traceback
-            print(f"💡 [RVC SETUP NOTICE] {cmd_err}")
+            print("\n" + "!" * 70)
+            print(f"🚨 [RVC IMPORT FAILURE] rvc_python failed to load: {cmd_err}")
             traceback.print_exc()
+            print("!" * 70 + "\n")
 
-        print("💡 [RVC NOTICE] RVC dependencies could not be loaded in current environment (CPU/Windows missing C++ wheels). Falling back to base Kokoro TTS.")
+        print("💡 [RVC NOTICE] RVC dependencies could not be loaded in current environment. Falling back to base Kokoro TTS.")
         return False
 
 
@@ -917,7 +987,7 @@ class CharacterVoiceConverter:
         self.model_path = model_path
         self.index_path = index_path
         self.pitch_shift = pitch_shift
-        self.f0_method = f0_method
+        self.f0_method = "rmvpe"  # Requirement 4: Explicitly hardcode to rmvpe
         self.index_rate = index_rate
         self.protect = protect
         self.filter_radius = filter_radius
@@ -953,7 +1023,9 @@ class CharacterVoiceConverter:
                     self.model_path = m_info.get("model_path")
                     self.index_path = m_info.get("index_path")
                 except Exception as e:
+                    import traceback
                     print(f"💡 [RVC AUTO-SETUP] Could not download RVC model: {e}")
+                    traceback.print_exc()
 
         if self.model_path and os.path.exists(self.model_path):
             self._init_rvc_engine()
@@ -961,15 +1033,39 @@ class CharacterVoiceConverter:
             print("💡 [RVC] Running in High-Speed Base Kokoro TTS Mode.")
 
     def _init_rvc_engine(self):
-        """Initializes the RVC engine with GPU acceleration."""
+        """Initializes the RVC engine with GPU acceleration and pre-flight checks."""
         global RVCInference, RVC_AVAILABLE
         print(f"\n🎙️ [STEP 2: RVC] Initializing RVC Engine with model: {Path(self.model_path).name}...")
+
+        # Requirement 2: Pre-flight check on character model asset
+        if not self.model_path or not os.path.exists(self.model_path):
+            print(f"🚨 [RVC PRE-FLIGHT] Character model not found: {self.model_path}")
+            self.engine = None
+            return
+
+        pth_size = Path(self.model_path).stat().st_size
+        if pth_size < 10_000_000:
+            print(f"🚨 [RVC PRE-FLIGHT] Model file too small ({pth_size} bytes). Corrupted download: {self.model_path}")
+            self.engine = None
+            return
+        print(f"  ✅ [RVC ASSET] Verified character model: {self.model_path} ({pth_size / (1024*1024):.1f} MB)")
+
+        if self.index_path:
+            if os.path.exists(self.index_path) and Path(self.index_path).stat().st_size > 0:
+                print(f"  ✅ [RVC ASSET] Verified feature index: {self.index_path}")
+            else:
+                print(f"  ⚠️ [RVC ASSET] Index file missing or empty ({self.index_path}). Proceeding without index.")
+                self.index_path = ""
+
         if not ensure_rvc_dependencies():
-            print("⚠️ [RVC LOAD ERROR] RVCInference is unavailable. Falling back to baseline TTS.")
+            print("⚠️ [RVC LOAD ERROR] RVCInference dependencies are unavailable. Falling back to baseline TTS.")
             self.engine = None
             return
 
         try:
+            # Requirement 2: Pre-flight base models (hubert_base.pt, rmvpe.pt)
+            ensure_rvc_base_models()
+
             device = "cuda:0"
             try:
                 import torch  # type: ignore
@@ -979,50 +1075,91 @@ class CharacterVoiceConverter:
             except Exception:
                 device = "cpu"
 
+            print(f"🎙️ [RVC INIT] Loading RVC weights on {device} (RMVPE pitch extraction)...")
             self.engine = RVCInference(device=device)  # type: ignore
             self.engine.load_model(self.model_path, index_path=self.index_path or "", version="v2")
             if hasattr(self.engine, "set_params"):
                 self.engine.set_params(
-                    f0method=self.f0_method,
+                    f0method="rmvpe",
                     f0up_key=self.pitch_shift,
                     index_rate=self.index_rate,
                     protect=self.protect,
                     filter_radius=getattr(self, "filter_radius", 3),
                     resample_sr=getattr(self, "resample_sr", 0),
                 )
-            print(f"✅ [STEP 2: RVC] RVC Model Loaded on {device} with RMVPE pitch extraction! {get_memory_stats()}")
+            print(f"✅ [STEP 2: RVC] RVC Engine fully loaded on {device} with RMVPE! {get_memory_stats()}")
         except Exception as e:
-            print(f"⚠️ [RVC LOAD ERROR] Could not load RVC engine: {e}. Falling back to baseline TTS.")
+            # Requirement 5: Expose the REAL error with full traceback
+            import traceback
+            print("\n" + "!" * 70)
+            print(f"🚨 [RVC LOAD ERROR] Complete stack trace for RVC initialization failure:")
+            traceback.print_exc()
+            print("!" * 70 + "\n")
             self.engine = None
 
     def convert_file(self, input_wav: Path, output_wav: Path) -> bool:
-        """Converts a single audio file to target character voice."""
+        """
+        Converts a single audio file to target character voice:
+        - Requirement 3 (Audio Handshake): Enforces 1-channel Mono & 16000Hz sampling.
+        - Requirement 4: Uses rmvpe pitch extraction.
+        - Requirement 5: Exposes raw traceback on any failure.
+        """
         if not self.engine:
             shutil.copyfile(input_wav, output_wav)
             return True
 
+        clean_temp_wav = input_wav.with_name(f"{input_wav.stem}_mono16k.wav")
         try:
+            # 1. Audio Handshake: enforce 1-channel Mono & 16000Hz sampling rate
+            y, sr = sf.read(str(input_wav), dtype="float32")
+            if len(y.shape) > 1:
+                y = np.mean(y, axis=1)  # convert multi-channel to mono
+
+            target_sr = 16000
+            if sr != target_sr and LIBROSA_AVAILABLE and librosa:
+                y = librosa.resample(y, orig_sr=sr, target_sr=target_sr)
+                sr = target_sr
+
+            # Write clean PCM 16-bit mono 16kHz audio
+            sf.write(str(clean_temp_wav), y, sr, subtype="PCM_16")
+
+            # 2. Hardcode f0_method to rmvpe
             if hasattr(self.engine, "set_params"):
                 self.engine.set_params(
-                    f0method=self.f0_method,
+                    f0method="rmvpe",
                     f0up_key=self.pitch_shift,
                     index_rate=self.index_rate,
                     protect=self.protect,
                 )
+
+            # 3. Perform inference
             try:
-                self.engine.infer_file(str(input_wav), str(output_wav))
+                self.engine.infer_file(str(clean_temp_wav), str(output_wav))
             except TypeError:
                 self.engine.infer_file(
-                    input_path=str(input_wav),
+                    input_path=str(clean_temp_wav),
                     output_path=str(output_wav),
                     pitch=self.pitch_shift,
-                    f0method=self.f0_method,
+                    f0method="rmvpe",
                 )
+
+            # Verify output file
+            if not output_wav.exists() or output_wav.stat().st_size < 1000:
+                raise RuntimeError(f"RVC output file is missing or empty ({output_wav})")
+
             return True
         except Exception as e:
-            print(f"⚠️ [RVC CONVERT ERROR] {input_wav.name}: {e}. Retaining baseline audio.")
+            # Requirement 5: Expose the REAL error with full traceback
+            import traceback
+            print("\n" + "!" * 70)
+            print(f"🚨 [RVC CONVERT ERROR] Complete stack trace for chunk {input_wav.name}:")
+            traceback.print_exc()
+            print("!" * 70 + "\n")
             shutil.copyfile(input_wav, output_wav)
             return False
+        finally:
+            if clean_temp_wav.exists():
+                clean_temp_wav.unlink(missing_ok=True)
 
 
 # ==================================================================================================

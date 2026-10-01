@@ -244,8 +244,6 @@ class RVCBatchConverter:
         if not RVC_AVAILABLE:
             print(
                 "⚠️ [RVC NOTICE] 'rvc-python' is not installed in the local environment.\n"
-                "   For GPU inference on Google Colab or local Nvidia GPU, install:\n"
-                "       !pip install rvc-python\n"
                 "   Operating in baseline audio verification mode (passthrough)."
             )
             self._is_ready = False
@@ -257,7 +255,7 @@ class RVCBatchConverter:
             self.engine.load_model(self.model_path, index_path=self.index_path or "", version="v2")
             if hasattr(self.engine, "set_params"):
                 self.engine.set_params(
-                    f0method=self.f0_method,
+                    f0method="rmvpe",
                     f0up_key=self.pitch_shift,
                     index_rate=self.index_rate,
                     protect=self.protect,
@@ -268,40 +266,68 @@ class RVCBatchConverter:
             print("✅ [RVC ENGINE] Model loaded successfully into memory!\n")
 
         except Exception as e:
-            print(f"⚠️ [RVC LOAD ERROR] Failed to load RVC engine: {e}")
-            print("Operating in baseline audio verification mode.")
+            import traceback
+            print("\n" + "!" * 70)
+            print(f"🚨 [RVC LOAD ERROR] Failed to load RVC engine: {e}")
+            traceback.print_exc()
+            print("!" * 70 + "\n")
             self.engine = None
             self._is_ready = False
 
     def convert_single_file(self, input_wav: str, output_wav: str) -> bool:
-        """Converts a single audio file using RVC."""
+        """
+        Converts a single audio file using RVC with Mono Audio Handshake and rmvpe.
+        """
         if not self._is_ready or not self.engine:
-            # Pass-through if RVC is not ready
             shutil.copyfile(input_wav, output_wav)
             return True
 
+        clean_temp_wav = Path(input_wav).with_name(f"{Path(input_wav).stem}_mono16k.wav")
         try:
+            # Audio Handshake: enforce 1-channel Mono & 16000Hz sampling rate
+            y, sr = sf.read(str(input_wav), dtype="float32")
+            if len(y.shape) > 1:
+                y = np.mean(y, axis=1)
+
+            target_sr = 16000
+            try:
+                import librosa
+                if sr != target_sr:
+                    y = librosa.resample(y, orig_sr=sr, target_sr=target_sr)
+                    sr = target_sr
+            except Exception:
+                pass
+
+            sf.write(str(clean_temp_wav), y, sr, subtype="PCM_16")
+
             if hasattr(self.engine, "set_params"):
                 self.engine.set_params(
-                    f0method=self.f0_method,
+                    f0method="rmvpe",
                     f0up_key=self.pitch_shift,
                     index_rate=self.index_rate,
                     protect=self.protect,
                 )
             try:
-                self.engine.infer_file(str(input_wav), str(output_wav))
+                self.engine.infer_file(str(clean_temp_wav), str(output_wav))
             except TypeError:
                 self.engine.infer_file(
-                    input_path=str(input_wav),
+                    input_path=str(clean_temp_wav),
                     output_path=str(output_wav),
                     pitch=self.pitch_shift,
-                    f0method=self.f0_method,
+                    f0method="rmvpe",
                 )
             return True
         except Exception as e:
-            print(f"⚠️ [RVC CONVERSION ERROR] Failed for {Path(input_wav).name}: {e}")
+            import traceback
+            print("\n" + "!" * 70)
+            print(f"🚨 [RVC CONVERSION ERROR] Failed for {Path(input_wav).name}: {e}")
+            traceback.print_exc()
+            print("!" * 70 + "\n")
             shutil.copyfile(input_wav, output_wav)
             return False
+        finally:
+            if clean_temp_wav.exists():
+                clean_temp_wav.unlink(missing_ok=True)
 
     def convert_batch(
         self,
