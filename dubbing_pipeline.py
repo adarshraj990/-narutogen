@@ -878,6 +878,14 @@ def get_kokoro_pipeline(lang_code: str = "h") -> Any:
             )
 
     device = "cuda" if (torch and torch.cuda.is_available()) else "cpu"
+    if IS_COLAB and device != "cuda":
+        raise RuntimeError(
+            "\n" + "=" * 80 + "\n"
+            "❌ [GPU CRITICAL] CUDA GPU is required on Google Colab (T4 GPU).\n"
+            "Requirement 2 strictly enforces GPU acceleration for Kokoro TTS.\n"
+            "Ensure Runtime -> Change runtime type -> T4 GPU is selected!"
+            + "\n" + "=" * 80 + "\n"
+        )
     print(f"📦 [KOKORO TTS] Initializing Kokoro-82M pipeline for language '{lang_code}' targeting {device.upper()}...")
     try:
         pipeline = KPipeline(lang_code=lang_code, device=device)
@@ -933,64 +941,128 @@ def synthesize_single_cue_kokoro(
 # ==================================================================================================
 def ensure_rvc_base_models(lib_dir: Optional[str] = None) -> bool:
     """
-    Pre-flight check (Requirement 2): Guarantees that hubert_base.pt and rmvpe.pt exist
-    and are valid non-empty files before RVC engine initialization.
-    Uses chunked streaming downloads with automatic directory discovery.
+    Requirement 4: Strict pre-flight asset verification and auto-download via huggingface_hub.
+    Guarantees that hubert_base.pt, rmvpe.pt, and rmvpe.onnx exist and are valid non-empty files
+    before RVC engine initialization. Syncs files into /content/models/base_model and rvc_python/base_model.
     """
-    import requests
-    if lib_dir is None:
-        try:
-            import rvc_python
-            lib_dir = os.path.dirname(os.path.abspath(rvc_python.__file__))
-        except Exception:
-            lib_dir = "rvc_python"
+    try:
+        from huggingface_hub import hf_hub_download
+        HF_HUB_AVAILABLE = True
+    except ImportError:
+        HF_HUB_AVAILABLE = False
 
-    base_model_dir = Path(lib_dir) / "base_model"
-    base_model_dir.mkdir(parents=True, exist_ok=True)
+    # Target directory 1: Colab / Workspace models directory
+    colab_base_dir = Path("/content/models/base_model").resolve() if IS_COLAB else (MODELS_BASE_DIR / "base_model").resolve()
+    colab_base_dir.mkdir(parents=True, exist_ok=True)
+
+    # Target directory 2: rvc_python internal base_model directory
+    rvc_lib_dir = None
+    try:
+        import rvc_python
+        rvc_lib_dir = Path(os.path.dirname(os.path.abspath(rvc_python.__file__))) / "base_model"
+        rvc_lib_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+
+    target_dirs = [colab_base_dir]
+    if rvc_lib_dir and rvc_lib_dir.resolve() != colab_base_dir.resolve():
+        target_dirs.append(rvc_lib_dir)
+
+    for extra_dir in [
+        Path("/content/models").resolve() if IS_COLAB else None,
+        (MODELS_BASE_DIR / "base_model").resolve(),
+        Path("models/base_model").resolve(),
+        Path("base_model").resolve(),
+        Path.cwd().resolve(),
+    ]:
+        if extra_dir and extra_dir not in target_dirs:
+            try:
+                extra_dir.mkdir(parents=True, exist_ok=True)
+                target_dirs.append(extra_dir)
+            except Exception:
+                pass
 
     required_assets = {
         "hubert_base.pt": {
-            "url": "https://huggingface.co/Daswer123/RVC_Base/resolve/main/hubert_base.pt",
-            "min_size": 40_000_000,  # Expected ~185 MB
+            "repo_id": "lj1995/VoiceConversionWebUI",
+            "url": "https://huggingface.co/lj1995/VoiceConversionWebUI/resolve/main/hubert_base.pt",
+            "min_size": 40_000_000,  # ~185 MB
         },
         "rmvpe.pt": {
-            "url": "https://huggingface.co/Daswer123/RVC_Base/resolve/main/rmvpe.pt",
-            "min_size": 10_000_000,  # Expected ~40 MB
+            "repo_id": "lj1995/VoiceConversionWebUI",
+            "url": "https://huggingface.co/lj1995/VoiceConversionWebUI/resolve/main/rmvpe.pt",
+            "min_size": 10_000_000,  # ~40 MB
         },
         "rmvpe.onnx": {
-            "url": "https://huggingface.co/Daswer123/RVC_Base/resolve/main/rmvpe.onnx",
-            "min_size": 5_000_000,
+            "repo_id": "lj1995/VoiceConversionWebUI",
+            "url": "https://huggingface.co/lj1995/VoiceConversionWebUI/resolve/main/rmvpe.onnx",
+            "min_size": 5_000_000,   # ~20 MB
         },
     }
 
-    print("\n🔍 [RVC PRE-FLIGHT] Verifying core base model assets in:", base_model_dir)
+    print("\n🔍 [RVC PRE-FLIGHT] Verifying core base models (hubert_base.pt, rmvpe.pt, rmvpe.onnx)...")
     for filename, meta in required_assets.items():
-        file_path = base_model_dir / filename
-        needs_download = True
-        if file_path.exists():
-            curr_size = file_path.stat().st_size
-            if curr_size >= meta["min_size"]:
-                print(f"  ✅ [ASSET OK] {filename} ({curr_size / (1024*1024):.1f} MB)")
-                needs_download = False
-            else:
-                print(f"  ⚠️ [ASSET INCOMPLETE] {filename} is only {curr_size} bytes. Re-downloading...")
+        found = False
+        valid_path = None
 
-        if needs_download:
-            print(f"  📥 [DOWNLOAD] Streaming {filename} from Hugging Face...")
-            try:
-                with requests.get(meta["url"], stream=True, timeout=180, allow_redirects=True) as resp:
-                    resp.raise_for_status()
-                    with open(file_path, "wb") as f:
-                        for chunk in resp.iter_content(chunk_size=1024 * 1024):
-                            if chunk:
-                                f.write(chunk)
-                final_size = file_path.stat().st_size
-                print(f"  ✅ [DOWNLOAD COMPLETE] {filename} saved ({final_size / (1024*1024):.1f} MB).")
-            except Exception as dl_err:
-                import traceback
-                print(f"  🚨 [DOWNLOAD FAILED] Could not fetch {filename}: {dl_err}")
-                traceback.print_exc()
-                return False
+        # Check existing copies across all target directories
+        for d in target_dirs:
+            p = d / filename
+            if p.exists() and p.stat().st_size >= meta["min_size"]:
+                print(f"  ✅ [ASSET VERIFIED] {filename} in {d.name} ({p.stat().st_size / (1024*1024):.1f} MB)")
+                found = True
+                valid_path = p
+                break
+
+        if not found:
+            print(f"  📥 [HF HUB DOWNLOAD] Fetching missing asset: {filename} from {meta['repo_id']}...")
+            downloaded = False
+            dest_file = colab_base_dir / filename
+
+            # Primary: Download via huggingface_hub
+            if HF_HUB_AVAILABLE:
+                try:
+                    downloaded_path = hf_hub_download(
+                        repo_id=meta["repo_id"],
+                        filename=filename,
+                        local_dir=str(colab_base_dir),
+                        local_dir_use_symlinks=False,
+                    )
+                    valid_path = Path(downloaded_path)
+                    downloaded = True
+                    print(f"  ✅ [HF HUB SUCCESS] Saved {filename} ({valid_path.stat().st_size / (1024*1024):.1f} MB).")
+                except Exception as hf_err:
+                    import traceback
+                    print(f"  ⚠️ [HF HUB NOTICE] hf_hub_download notice: {hf_err}. Attempting direct streaming fallback...")
+                    traceback.print_exc()
+
+            # Secondary fallback: Direct HTTP streaming
+            if not downloaded:
+                import requests
+                try:
+                    with requests.get(meta["url"], stream=True, timeout=180, allow_redirects=True) as resp:
+                        resp.raise_for_status()
+                        with open(dest_file, "wb") as f:
+                            for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                                if chunk:
+                                    f.write(chunk)
+                    valid_path = dest_file
+                    print(f"  ✅ [STREAM COMPLETE] Saved {filename} ({valid_path.stat().st_size / (1024*1024):.1f} MB).")
+                except Exception as stream_err:
+                    import traceback
+                    print(f"\n🚨 [DOWNLOAD FAILED] Could not fetch {filename}: {stream_err}")
+                    traceback.print_exc()
+                    raise RuntimeError(f"Critical RVC base model asset missing: {filename}")
+
+        # Sync across all destination directories
+        if valid_path and valid_path.exists():
+            for d in target_dirs:
+                synced_dest = d / filename
+                if not synced_dest.exists() or synced_dest.stat().st_size < meta["min_size"]:
+                    try:
+                        shutil.copy2(valid_path, synced_dest)
+                    except Exception:
+                        pass
 
     return True
 
@@ -1026,44 +1098,41 @@ def ensure_rvc_dependencies() -> bool:
             print(f"\n💡 [RVC PROBE] Initial direct import failed ({import_err}). Starting dependency check...")
             traceback.print_exc()
 
-        if not IS_COLAB:
-            # Attempt 2: Auto-install with clean pip (Local / Server fallback without --no-deps hacks)
-            print("⚡ [RVC SETUP] Installing RVC runtime modules cleanly...")
-            clean_packages = [
-                "fairseq-fixed", "pyworld-fixed", "rvc-python",
-                "hydra-core", "omegaconf", "antlr4-python3-runtime==4.9.3",
-                "faiss-cpu", "soundfile", "pydub"
-            ]
+        # Attempt 2: Auto-install with pip (Both Colab and local environments)
+        print("⚡ [RVC SETUP] Installing RVC runtime modules (fairseq-fixed, pyworld-fixed, rvc-python)...")
+        faiss_pkg = "faiss-gpu-cu12" if (torch and torch.cuda.is_available() and IS_COLAB) else "faiss-cpu"
+        install_commands = [
+            [sys.executable, "-m", "pip", "install", "-q", "--no-deps", "fairseq-fixed", "pyworld-fixed", "rvc-python"],
+            [sys.executable, "-m", "pip", "install", "-q", "numpy<2.0.0", "hydra-core", "omegaconf", "antlr4-python3-runtime==4.9.3", faiss_pkg, "onnxruntime-gpu", "soundfile", "pydub"],
+        ]
+        for cmd in install_commands:
             try:
-                cmd = [sys.executable, "-m", "pip", "install", "-q"] + clean_packages
-                print(f"📦 [RVC SETUP] Running: pip install {' '.join(clean_packages)}")
+                print(f"📦 [RVC SETUP] Running: pip {' '.join(cmd[3:])}")
                 subprocess.run(cmd, check=True)
             except Exception as cmd_err:
                 import traceback
                 print(f"💡 [RVC SETUP NOTICE] {cmd_err}")
                 traceback.print_exc()
 
-            # Apply disk and in-memory patches immediately after pip installation
-            _patch_fairseq_registry()
-            _patch_tensorboard_for_fairseq()
+        # Apply disk and in-memory patches immediately after pip installation
+        _patch_fairseq_registry()
+        _patch_tensorboard_for_fairseq()
 
-            try:
-                from rvc_python.infer import RVCInference as _RVCClass  # type: ignore
-                RVCInference = _RVCClass
-                RVC_AVAILABLE = True
-                print("✅ [RVC SETUP] 'rvc-python' installed and verified successfully!")
-                return True
-            except Exception as cmd_err:
-                import traceback
-                print("\n" + "!" * 70)
-                print(f"🚨 [RVC IMPORT FAILURE] rvc_python failed to load: {cmd_err}")
-                traceback.print_exc()
-                print("!" * 70 + "\n")
-        else:
-            print("💡 [COLAB NOTE] Please run the notebook's initial '!pip install' cell to install RVC dependencies.")
+        try:
+            from rvc_python.infer import RVCInference as _RVCClass  # type: ignore
+            RVCInference = _RVCClass
+            RVC_AVAILABLE = True
+            print("✅ [RVC SETUP] 'rvc-python' installed and verified successfully!")
+            return True
+        except Exception as cmd_err:
+            import traceback
+            print("\n" + "!" * 80)
+            print(f"🚨 [RVC IMPORT FAILURE] rvc_python failed to load: {cmd_err}")
+            traceback.print_exc()
+            print("!" * 80 + "\n")
+            raise RuntimeError(f"RVC dependencies failed to initialize: {cmd_err}")
 
-        print("💡 [RVC NOTICE] RVC dependencies could not be loaded in current environment. Falling back to base Kokoro TTS.")
-        return False
+        raise RuntimeError("RVC dependencies could not be loaded in current environment.")
 
 
 class CharacterVoiceConverter:
@@ -1084,7 +1153,7 @@ class CharacterVoiceConverter:
         self.model_path = model_path
         self.index_path = index_path
         self.pitch_shift = pitch_shift
-        self.f0_method = "rmvpe"  # Requirement 4: Explicitly hardcode to rmvpe
+        self.f0_method = "rmvpe"  # Requirement 2 & 4: Explicitly hardcode to rmvpe
         self.index_rate = index_rate
         self.protect = protect
         self.filter_radius = filter_radius
@@ -1129,30 +1198,31 @@ class CharacterVoiceConverter:
                     self.index_path = m_info.get("index_path")
                 except Exception as e:
                     import traceback
-                    print(f"💡 [RVC AUTO-SETUP] Could not download RVC model: {e}")
+                    print(f"🚨 [RVC AUTO-SETUP ERROR] Could not download RVC model: {e}")
                     traceback.print_exc()
+                    raise RuntimeError(f"Failed to obtain RVC character model: {e}")
 
-        if self.model_path and os.path.exists(self.model_path):
-            self._init_rvc_engine()
-        else:
-            print("💡 [RVC] Running in High-Speed Base Kokoro TTS Mode.")
+        if not self.model_path or not os.path.exists(self.model_path):
+            raise FileNotFoundError(f"RVC model weights (.pth) not found: {self.model_path}")
+
+        self._init_rvc_engine()
 
     def _init_rvc_engine(self):
-        """Initializes the RVC engine with GPU acceleration and pre-flight checks."""
+        """Initializes the RVC engine with forced CUDA execution, pre-flight checks, and raw error exposure."""
         global RVCInference, RVC_AVAILABLE
         print(f"\n🎙️ [STEP 2: RVC] Initializing RVC Engine with model: {Path(self.model_path).name}...")
 
-        # Requirement 2: Pre-flight check on character model asset
+        # Requirement 4: Pre-flight check on character model asset
         if not self.model_path or not os.path.exists(self.model_path):
-            print(f"🚨 [RVC PRE-FLIGHT] Character model not found: {self.model_path}")
-            self.engine = None
-            return
+            err_msg = f"🚨 [RVC PRE-FLIGHT] Character model not found: {self.model_path}"
+            print(err_msg)
+            raise FileNotFoundError(err_msg)
 
         pth_size = Path(self.model_path).stat().st_size
         if pth_size < 10_000_000:
-            print(f"🚨 [RVC PRE-FLIGHT] Model file too small ({pth_size} bytes). Corrupted download: {self.model_path}")
-            self.engine = None
-            return
+            err_msg = f"🚨 [RVC PRE-FLIGHT] Model file too small ({pth_size} bytes). Corrupted download: {self.model_path}"
+            print(err_msg)
+            raise ValueError(err_msg)
         print(f"  ✅ [RVC ASSET] Verified character model: {self.model_path} ({pth_size / (1024*1024):.1f} MB)")
 
         if self.index_path:
@@ -1162,28 +1232,46 @@ class CharacterVoiceConverter:
                 print(f"  ⚠️ [RVC ASSET] Index file missing or empty ({self.index_path}). Proceeding without index.")
                 self.index_path = ""
 
+        # Check and load dependencies (No silent fallback!)
         if not ensure_rvc_dependencies():
-            print("⚠️ [RVC LOAD ERROR] RVCInference dependencies are unavailable. Falling back to baseline TTS.")
-            self.engine = None
-            return
+            import traceback
+            err_msg = "🚨 [RVC LOAD ERROR] RVC dependencies are unavailable. Cannot proceed without voice conversion!"
+            print(err_msg)
+            traceback.print_exc()
+            raise RuntimeError(err_msg)
 
         try:
-            # Requirement 2: Pre-flight base models (hubert_base.pt, rmvpe.pt)
+            # Requirement 4: Pre-flight base models (hubert_base.pt, rmvpe.pt, rmvpe.onnx)
             ensure_rvc_base_models()
 
+            # Requirement 2: Force CUDA Execution (No silent CPU fallback on Colab)
+            import torch  # type: ignore
+            if not torch.cuda.is_available():
+                err_msg = (
+                    "\n" + "=" * 80 + "\n"
+                    "🚨 [FATAL CUDA ERROR] CUDA is NOT available for RVC!\n"
+                    "Requirement 2 strictly enforces GPU acceleration. "
+                    "In Google Colab, change runtime to 'T4 GPU' via Runtime -> Change runtime type."
+                    + "\n" + "=" * 80 + "\n"
+                )
+                print(err_msg)
+                raise RuntimeError(err_msg)
+
             device = "cuda:0"
+            gpu_name = torch.cuda.get_device_name(0)
+            total_vram = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+            print(f"🚀 [FORCED CUDA EXECUTION] Initializing RVC on GPU: {gpu_name} (device={device}, VRAM={total_vram:.1f} GB)")
+
+            # Check ONNX Runtime GPU provider
             try:
-                import torch  # type: ignore
-                if torch.cuda.is_available():
-                    device = "cuda:0"
-                    gpu_name = torch.cuda.get_device_name(0)
-                    total_vram = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-                    print(f"🚀 [RVC CUDA ACCELERATION] Loading RVC on GPU {gpu_name} (device={device}, VRAM={total_vram:.1f} GB)")
+                import onnxruntime as ort
+                ort_providers = ort.get_available_providers()
+                if "CUDAExecutionProvider" in ort_providers:
+                    print("⚡ [RMVPE ONNX GPU] CUDAExecutionProvider is active and ready for RMVPE pitch extraction!")
                 else:
-                    device = "cpu"
-                    print("⚠️ [RVC NOTICE] CUDA unavailable, running RVC on CPU.")
+                    print(f"ℹ️ [ONNX RUNTIME] Active execution providers: {ort_providers}")
             except Exception:
-                device = "cpu"
+                pass
 
             print(f"🎙️ [RVC INIT] Loading RVC weights on {device} (RMVPE pitch extraction)...")
             self.engine = RVCInference(device=device)  # type: ignore
@@ -1199,41 +1287,52 @@ class CharacterVoiceConverter:
                 )
             print(f"✅ [STEP 2: RVC] RVC Engine fully loaded on {device} with RMVPE! {get_memory_stats()}")
         except Exception as e:
-            # Requirement 5: Expose the REAL error with full traceback
+            # Requirement 3: Expose the REAL error with full traceback
             import traceback
-            print("\n" + "!" * 70)
+            print("\n" + "!" * 80)
             print(f"🚨 [RVC LOAD ERROR] Complete stack trace for RVC initialization failure:")
             traceback.print_exc()
-            print("!" * 70 + "\n")
+            print("!" * 80 + "\n")
             self.engine = None
+            raise RuntimeError(f"RVC engine initialization failed on {device}: {e}")
 
     def convert_file(self, input_wav: Path, output_wav: Path) -> bool:
         """
         Converts a single audio file to target character voice:
-        - Requirement 3 (Audio Handshake): Enforces 1-channel Mono & 16000Hz sampling.
-        - Requirement 4: Uses rmvpe pitch extraction.
-        - Requirement 5: Exposes raw traceback on any failure.
+        - Requirement 5 (Audio Handshake): Enforces 1-channel Mono & 16000Hz sampling rate, PCM_16 format.
+        - Requirement 2: Forced CUDA execution.
+        - Requirement 3: Exposes raw traceback on any failure (no silent fallback).
         """
         if not self.engine:
-            shutil.copyfile(input_wav, output_wav)
-            return True
+            err_msg = f"🚨 [RVC ERROR] Cannot convert '{input_wav.name}': RVC Engine is not initialized!"
+            print(err_msg)
+            raise RuntimeError(err_msg)
 
         clean_temp_wav = input_wav.with_name(f"{input_wav.stem}_mono16k.wav")
         try:
-            # 1. Audio Handshake: enforce 1-channel Mono & 16000Hz sampling rate
+            # 1. Audio Handshake (Requirement 5)
             y, sr = sf.read(str(input_wav), dtype="float32")
             if len(y.shape) > 1:
-                y = np.mean(y, axis=1)  # convert multi-channel to mono
+                y = np.mean(y, axis=1)  # enforce 1-channel mono
 
-            target_sr = 16000
-            if sr != target_sr and LIBROSA_AVAILABLE and librosa:
-                y = librosa.resample(y, orig_sr=sr, target_sr=target_sr)
+            target_sr = 16000  # RVC Hubert feature extractor expects strictly 16000 Hz
+            if sr != target_sr:
+                if LIBROSA_AVAILABLE and librosa:
+                    y = librosa.resample(y, orig_sr=sr, target_sr=target_sr)
+                else:
+                    from scipy.signal import resample
+                    target_length = int(len(y) * target_sr / sr)
+                    y = resample(y, target_length)
                 sr = target_sr
 
-            # Write clean PCM 16-bit mono 16kHz audio
+            # Clip amplitude to prevent distortion
+            y = np.nan_to_num(y, nan=0.0, posinf=1.0, neginf=-1.0)
+            y = np.clip(y, -1.0, 1.0)
+
+            # Write clean PCM 16-bit mono 16kHz audio for the RVC handshake
             sf.write(str(clean_temp_wav), y, sr, subtype="PCM_16")
 
-            # 2. Hardcode f0_method to rmvpe
+            # 2. Hardcode f0_method to rmvpe on CUDA
             if hasattr(self.engine, "set_params"):
                 self.engine.set_params(
                     f0method="rmvpe",
@@ -1259,14 +1358,13 @@ class CharacterVoiceConverter:
 
             return True
         except Exception as e:
-            # Requirement 5: Expose the REAL error with full traceback
+            # Requirement 3: Expose the REAL error with full traceback
             import traceback
-            print("\n" + "!" * 70)
-            print(f"🚨 [RVC CONVERT ERROR] Complete stack trace for chunk {input_wav.name}:")
+            print("\n" + "!" * 80)
+            print(f"🚨 [RVC INFERENCE ERROR] Complete stack trace for chunk {input_wav.name}:")
             traceback.print_exc()
-            print("!" * 70 + "\n")
-            shutil.copyfile(input_wav, output_wav)
-            return False
+            print("!" * 80 + "\n")
+            raise RuntimeError(f"RVC audio conversion failed on {input_wav.name}: {e}")
         finally:
             if clean_temp_wav.exists():
                 clean_temp_wav.unlink(missing_ok=True)
@@ -1443,9 +1541,14 @@ def process_single_language_chunked(
             synthesize_single_cue_kokoro(cue, pipeline, voice=voice, output_wav_path=cue_wav)
             cue.base_wav_path = str(cue_wav)
 
-        # 2. RVC Voice Conversion for this chunk
+        # 2. RVC Voice Conversion for this chunk (Requirement 3: No silent fallback)
         for cue in chunk_cues:
-            if converter.engine:
+            if converter and getattr(converter, "model_path", None):
+                if not converter.engine:
+                    raise RuntimeError(
+                        f"🚨 [RVC FATAL ERROR] Character voice conversion model is configured ('{converter.model_path}'), "
+                        "but the RVC Engine failed to initialize! Silent fallback is strictly disabled."
+                    )
                 out_rvc_wav = sub_dir / f"cue_{cue.cue_id:04d}_rvc.wav"
                 converter.convert_file(Path(cue.base_wav_path), out_rvc_wav)
                 cue.rvc_wav_path = str(out_rvc_wav)

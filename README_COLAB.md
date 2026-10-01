@@ -22,12 +22,21 @@ if not os.path.exists('/content/narutogen'):
 
 ---
 
-### Cell 2: Install Dependencies & RVC GPU Support (Conflict-Free)
+### Cell 2: Install Dependencies & RVC GPU Support (Conflict-Free Matrix)
 ```bash
 !apt-get update -qq && apt-get install -y ffmpeg espeak-ng
-!pip install -q kokoro soundfile gradio pydub pysrt librosa
-!pip install -q av ffmpeg-python loguru praat-parselmouth torchcrepe faiss-cpu
+
+# 1. Enforce NumPy < 2.0.0 ABI compatibility for Fairseq / PyTorch / PyWorld C-extensions
+!pip install -q "numpy<2.0.0"
+
+# 2. Install prebuilt C-extensions for Fairseq & PyWorld without triggering PyPI source build failure
 !pip install -q --no-deps fairseq-fixed pyworld-fixed rvc-python
+
+# 3. Install GPU-accelerated FAISS (CUDA 12) & ONNX Runtime GPU (T4 TensorRT/CUDA)
+!pip install -q faiss-gpu-cu12 onnxruntime-gpu || pip install -q faiss-cpu onnxruntime-gpu
+
+# 4. Install Fairseq/RVC sub-dependencies, Kokoro Neural TTS & Web UI
+!pip install -q hydra-core omegaconf "antlr4-python3-runtime==4.9.3" kokoro soundfile pydub pysrt gradio>=4.44.1 librosa huggingface_hub requests psutil
 ```
 
 ---
