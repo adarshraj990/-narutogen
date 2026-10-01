@@ -1099,16 +1099,19 @@ def ensure_rvc_dependencies() -> bool:
             traceback.print_exc()
 
         # Attempt 2: Auto-install with pip (Both Colab and local environments)
-        print("⚡ [RVC SETUP] Installing RVC runtime modules (fairseq-fixed, pyworld-fixed, rvc-python)...")
+        print("⚡ [RVC SETUP] Installing RVC runtime modules (fairseq-fixed, pyworld-prebuilt, rvc-python)...")
         faiss_pkg = "faiss-gpu-cu12" if (torch and torch.cuda.is_available() and IS_COLAB) else "faiss-cpu"
+        pip_env = os.environ.copy()
+        pip_env["NO_CUDA"] = "1"
         install_commands = [
-            [sys.executable, "-m", "pip", "install", "-q", "--no-deps", "fairseq-fixed", "pyworld-fixed", "rvc-python"],
-            [sys.executable, "-m", "pip", "install", "-q", "numpy<2.0.0", "hydra-core", "omegaconf", "antlr4-python3-runtime==4.9.3", faiss_pkg, "onnxruntime-gpu", "soundfile", "pydub"],
+            [sys.executable, "-m", "pip", "install", "cython", "wheel", "setuptools", "pyworld-prebuilt"],
+            [sys.executable, "-m", "pip", "install", "--no-build-isolation", "--no-deps", "fairseq-fixed", "rvc-python"],
+            [sys.executable, "-m", "pip", "install", "numpy<2.0.0", "hydra-core", "omegaconf", "antlr4-python3-runtime==4.9.3", faiss_pkg, "onnxruntime-gpu", "soundfile", "pydub"],
         ]
         for cmd in install_commands:
             try:
                 print(f"📦 [RVC SETUP] Running: pip {' '.join(cmd[3:])}")
-                subprocess.run(cmd, check=True)
+                subprocess.run(cmd, check=True, env=pip_env)
             except Exception as cmd_err:
                 import traceback
                 print(f"💡 [RVC SETUP NOTICE] {cmd_err}")
