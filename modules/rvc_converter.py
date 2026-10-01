@@ -90,15 +90,27 @@ except ImportError:
     torch = None
     TORCH_AVAILABLE = False
 
-# Try importing RVC Inference libraries (rvc_python.infer exports RVCInference)
-try:
-    _patch_fairseq_registry()
-    _patch_tensorboard_for_fairseq()
-    from rvc_python.infer import RVCInference
-    RVC_AVAILABLE = True
-except Exception as _rvc_err:
-    RVCInference = None
-    RVC_AVAILABLE = False
+# ── Try importing RVC (infer-rvc-python first [fairseq-free], rvc-python as legacy fallback) ──────
+RVCInference = None
+RVC_AVAILABLE = False
+_patch_fairseq_registry()
+_patch_tensorboard_for_fairseq()
+for _rvc_mod, _rvc_cls in [
+    ("infer_rvc_python.infer", "RVCInference"),   # preferred: fairseq-free fork
+    ("rvc_python.infer",       "RVCInference"),   # legacy: rvc-python (needs fairseq)
+]:
+    try:
+        import importlib as _il
+        _m = _il.import_module(_rvc_mod)
+        RVCInference = getattr(_m, _rvc_cls)
+        RVC_AVAILABLE = True
+        print(f"✅ [RVC Module] Loaded from '{_rvc_mod}'.")
+        break
+    except Exception:
+        continue
+if not RVC_AVAILABLE:
+    print("⚠️ [RVC Module] No RVC library found — RVCBatchConverter will raise on init.")
+
 
 
 def find_default_naruto_model() -> Tuple[Optional[str], Optional[str]]:

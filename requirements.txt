@@ -1,42 +1,51 @@
-# Core Audio Processing & Subtitles
-pysrt>=1.1.2
+# ====================================================================================================
+# NARUTOGEN — Dependency Matrix (Google Colab T4 GPU + Hugging Face Spaces Compatible)
+# ====================================================================================================
+# ⚠️  DO NOT add fairseq, rvc-python, or pyworld here.
+#     These are installed separately via the Colab notebook cell to avoid compilation hangs.
+#     On Hugging Face Spaces they are handled by ensure_rvc_dependencies() at runtime.
+# ====================================================================================================
+
+# ── Core Audio ─────────────────────────────────────────────────────────────────
 pydub>=0.25.1
 soundfile>=0.12.1
 librosa>=0.10.1
-numpy<2.0.0
 scipy
-setuptools
-antlr4-python3-runtime==4.9.3
+
+# ── NumPy: MUST stay < 2.0 to avoid ABI crashes with fairseq/rvc ──────────────
+numpy<2.0.0
+
+# ── Subtitle & Text Utilities ──────────────────────────────────────────────────
+pysrt>=1.1.2
+regex
+
+# ── RVC Runtime Sub-deps (no-compile, pure Python or wheels available) ─────────
+# infer-rvc-python is a fairseq-FREE fork; installs cleanly without C++ compilation
+infer-rvc-python
+pyworld-prebuilt
 omegaconf
 hydra-core
-bitarray
-cython
-regex
-sacrebleu>=1.4.12
-scikit-learn
-cffi
+antlr4-python3-runtime==4.9.3
 tqdm
 
+# ── GPU Acceleration (ONNX Runtime GPU for RMVPE; FAISS for index search) ───────
+onnxruntime-gpu
+faiss-cpu
 
-
-# Kokoro-82M Local Neural TTS (100% Local, Offline, No API Keys)
+# ── Kokoro-82M Neural TTS ──────────────────────────────────────────────────────
 kokoro
 
-# RVC Runtime Dependencies & Pitch Tools (CUDA Accelerated)
-onnxruntime-gpu
-torchcrepe
-faiss-cpu
-av>=11.0.0
-ffmpeg-python>=0.2.0
-loguru>=0.7.0
-praat-parselmouth>=0.4.2
+# ── Gradio Web UI (pinned to a known stable range for HF Spaces) ──────────────
+gradio>=4.44.1
 
-# System Monitoring & PyTorch Utilities
+# ── Hugging Face Integration ───────────────────────────────────────────────────
+huggingface_hub>=0.23.0,<1.0.0
+requests
+
+# ── System Monitoring ─────────────────────────────────────────────────────────
 psutil>=5.9.0
 
-# Hugging Face Spaces & Gradio 4.44.1 Stability (prevents 500 Internal Server Error)
-gradio>=4.44.1
-huggingface_hub>=0.23.0,<1.0.0
-starlette<1.0.0
-pydantic<2.11.0
-requests
+# ── Build Tools (needed for any source packages) ──────────────────────────────
+setuptools
+wheel
+cython

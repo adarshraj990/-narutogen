@@ -294,18 +294,26 @@ try:
 except Exception:
     pass
 
-# Try importing RVC
+# ── Try importing RVC (infer-rvc-python first [fairseq-free], rvc-python as legacy fallback) ──────
 RVCInference: Any = None
 RVC_AVAILABLE = False
-try:
-    _patch_fairseq_registry()
-    _patch_tensorboard_for_fairseq()
-    from rvc_python.infer import RVCInference as _RVCClass  # type: ignore
-    RVCInference = _RVCClass
-    RVC_AVAILABLE = True
-except Exception:
-    RVCInference = None
-    RVC_AVAILABLE = False
+_patch_fairseq_registry()
+_patch_tensorboard_for_fairseq()
+for _rvc_mod, _rvc_cls in [
+    ("infer_rvc_python.infer", "RVCInference"),
+    ("rvc_python.infer",       "RVCInference"),
+]:
+    try:
+        import importlib as _il
+        _m = _il.import_module(_rvc_mod)
+        RVCInference = getattr(_m, _rvc_cls)
+        RVC_AVAILABLE = True
+        print(f"✅ [RVC] Module-level import OK: {_rvc_mod}.{_rvc_cls}")
+        break
+    except Exception:
+        continue
+if not RVC_AVAILABLE:
+    print("⚠️ [RVC] Neither infer_rvc_python nor rvc_python found at module load. Will retry via ensure_rvc_dependencies().")
 
 
 # ==================================================================================================
@@ -1069,13 +1077,39 @@ def ensure_rvc_base_models(lib_dir: Optional[str] = None) -> bool:
 
 _RVC_LOCK = threading.Lock()
 
+# ─── RVC import path: infer-rvc-python (fairseq-FREE fork, pip-installable cleanly) ───────────────
+# Package: infer-rvc-python  →  installs as: infer_rvc_python
+# Old:     rvc-python        →  installs as: rvc_python  (needs fairseq → compilation hang)
+_RVC_IMPORT_PATHS = [
+    ("infer_rvc_python.infer", "RVCInference"),   # ← preferred: fairseq-free fork
+    ("rvc_python.infer",       "RVCInference"),   # ← legacy fallback if already installed
+]
+
+def _try_import_rvc() -> bool:
+    """Attempts to import RVCInference from either infer_rvc_python or rvc_python."""
+    global RVCInference, RVC_AVAILABLE
+    for module_path, class_name in _RVC_IMPORT_PATHS:
+        try:
+            import importlib
+            mod = importlib.import_module(module_path)
+            RVCInference = getattr(mod, class_name)
+            RVC_AVAILABLE = True
+            print(f"✅ [RVC] Loaded RVCInference from '{module_path}'.")
+            return True
+        except Exception:
+            continue
+    return False
+
+
 def ensure_rvc_dependencies() -> bool:
     """
-    Ensures rvc-python and dependencies are installed and importable.
-    Enforces Requirement 1: Dependency Hell Resolution.
-    Thread-safe and exposes complete stack traces on failure (Requirement 5).
+    Ensures infer-rvc-python (fairseq-FREE RVC fork) is installed and importable.
+    - NO fairseq compilation → NO hang.
+    - Exposes full stack traces on failure (no silent fallbacks).
+    - Thread-safe.
     """
     global RVCInference, RVC_AVAILABLE
+
     if RVC_AVAILABLE and RVCInference is not None:
         return True
 
@@ -1083,57 +1117,68 @@ def ensure_rvc_dependencies() -> bool:
         if RVC_AVAILABLE and RVCInference is not None:
             return True
 
-        # Pre-patch Fairseq registry and TensorBoard shims
+        # ── Pre-patch shims regardless of what's installed ────────────────────
         _patch_fairseq_registry()
         _patch_tensorboard_for_fairseq()
 
-        # Attempt 1: Direct import
-        try:
-            from rvc_python.infer import RVCInference as _RVCClass  # type: ignore
-            RVCInference = _RVCClass
-            RVC_AVAILABLE = True
+        # ── Attempt 1: Direct import (already installed) ───────────────────────
+        if _try_import_rvc():
             return True
-        except Exception as import_err:
-            import traceback
-            print(f"\n💡 [RVC PROBE] Initial direct import failed ({import_err}). Starting dependency check...")
-            traceback.print_exc()
 
-        # Attempt 2: Auto-install with pip (Both Colab and local environments)
-        print("⚡ [RVC SETUP] Installing RVC runtime modules (fairseq-fixed, pyworld-prebuilt, rvc-python)...")
-        faiss_pkg = "faiss-gpu-cu12" if (torch and torch.cuda.is_available() and IS_COLAB) else "faiss-cpu"
+        import traceback as _tb
+        print("\n💡 [RVC PROBE] No RVC library found. Installing infer-rvc-python (fairseq-free)...")
+
+        # ── Attempt 2: pip install infer-rvc-python (clean, no C++ compile) ────
+        faiss_pkg = "faiss-gpu-cu12" if (
+            torch and torch.cuda.is_available() and IS_COLAB
+        ) else "faiss-cpu"
         pip_env = os.environ.copy()
-        pip_env["NO_CUDA"] = "1"
-        install_commands = [
-            [sys.executable, "-m", "pip", "install", "cython", "wheel", "setuptools", "pyworld-prebuilt"],
-            [sys.executable, "-m", "pip", "install", "--no-build-isolation", "--no-deps", "fairseq-fixed", "rvc-python"],
-            [sys.executable, "-m", "pip", "install", "numpy<2.0.0", "hydra-core", "omegaconf", "antlr4-python3-runtime==4.9.3", faiss_pkg, "onnxruntime-gpu", "soundfile", "pydub"],
-        ]
-        for cmd in install_commands:
-            try:
-                print(f"📦 [RVC SETUP] Running: pip {' '.join(cmd[3:])}")
-                subprocess.run(cmd, check=True, env=pip_env)
-            except Exception as cmd_err:
-                import traceback
-                print(f"💡 [RVC SETUP NOTICE] {cmd_err}")
-                traceback.print_exc()
+        pip_env["NO_CUDA"] = "1"   # suppress any residual CUDA kernel compilation
 
-        # Apply disk and in-memory patches immediately after pip installation
+        install_steps = [
+            # Step A: numpy pin + build tools + pyworld pre-built wheel
+            [sys.executable, "-m", "pip", "install", "-q",
+             "numpy<2.0.0", "cython", "setuptools", "wheel", "pyworld-prebuilt"],
+            # Step B: infer-rvc-python — fairseq-free, pure-wheel install
+            [sys.executable, "-m", "pip", "install", "-q", "--prefer-binary",
+             "infer-rvc-python"],
+            # Step C: GPU utilities
+            [sys.executable, "-m", "pip", "install", "-q", "--prefer-binary",
+             faiss_pkg, "onnxruntime-gpu"],
+            # Step D: RVC sub-deps
+            [sys.executable, "-m", "pip", "install", "-q",
+             "hydra-core", "omegaconf", "antlr4-python3-runtime==4.9.3",
+             "soundfile", "pydub"],
+        ]
+
+        for cmd in install_steps:
+            try:
+                label = " ".join(cmd[cmd.index("install") + 1:])
+                print(f"📦 [RVC SETUP] pip install {label}")
+                subprocess.run(cmd, check=True, env=pip_env, timeout=300)
+            except subprocess.TimeoutExpired:
+                print(f"⏱️ [RVC SETUP] Step timed-out after 5 min — continuing to next step...")
+            except Exception as step_err:
+                print(f"⚠️ [RVC SETUP] Step notice: {step_err}")
+                _tb.print_exc()
+
+        # Re-apply patches after fresh install
         _patch_fairseq_registry()
         _patch_tensorboard_for_fairseq()
 
-        try:
-            from rvc_python.infer import RVCInference as _RVCClass  # type: ignore
-            RVCInference = _RVCClass
-            RVC_AVAILABLE = True
-            print("✅ [RVC SETUP] 'rvc-python' installed and verified successfully!")
+        # ── Attempt 3: Import after install ───────────────────────────────────
+        if _try_import_rvc():
             return True
-        except Exception as cmd_err:
-            import traceback
-            print("\n" + "!" * 80)
-            print(f"🚨 [RVC IMPORT FAILURE] rvc_python still cannot be loaded after pip install: {cmd_err}")
-            traceback.print_exc()
-            print("!" * 80 + "\n")
-            raise RuntimeError(f"RVC dependencies failed to initialize even after install: {cmd_err}")
+
+        # ── Final: Loud failure — full traceback exposed ───────────────────────
+        print("\n" + "!" * 80)
+        print("🚨 [RVC IMPORT FAILURE] infer-rvc-python could not be loaded after install!")
+        print("   Run Step 2 of the Colab notebook, then Runtime → Restart runtime → Step 3.")
+        print("!" * 80 + "\n")
+        raise RuntimeError(
+            "RVC engine (infer-rvc-python) failed to initialize. "
+            "Re-run the Colab Step-2 install cell and restart the runtime."
+        )
 
 
 

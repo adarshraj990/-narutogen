@@ -1,89 +1,84 @@
-# 🍥 NarutoGen - Google Colab & Hugging Face Spaces Setup Guide
+# 🍥 AI Dubbing Studio — Colab Deployment Guide
 
-Follow these exact steps in Google Colab (Free Tier T4 GPU) or Hugging Face Spaces to run the Kokoro-82M + RVC Voice Dubbing Pipeline with **2-Hour Chunking Architecture**.
-
----
-
-### Step 0: Set Runtime to GPU (Colab)
-1. In Google Colab top menu, click **Runtime** &rarr; **Change runtime type**.
-2. Under **Hardware accelerator**, select **T4 GPU**.
-3. Click **Save**.
+> **Kokoro-82M TTS + RVC Voice Conversion (RMVPE) + FFmpeg + Gradio**
+> Optimized for Google Colab Free T4 GPU
 
 ---
 
-### ⚡ All-in-One 1-Click Launch Cell (Run this single cell directly!)
-Copy and paste this entire block into **ONE single Colab cell** and press `Shift + Enter`. It will automatically handle repository cloning, conflict-free GPU dependencies, Kokoro & RVC setup, and launch the Gradio public UI with real-time log streaming:
+## 🚀 One-Click Launch
 
-```bash
-# 1. Verify Active T4 GPU
-!nvidia-smi
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/adarshraj990/-narutogen/blob/main/AI_Dubbing_Studio_Colab.ipynb)
 
-# 2. System Audio Dependencies
-!apt-get update -qq && apt-get install -y -qq ffmpeg espeak-ng
+---
 
-# 3. Clone or Update Pipeline Codebase
-!git clone https://github.com/adarshraj990/-narutogen.git /content/narutogen || (cd /content/narutogen && git pull origin main)
-%cd /content/narutogen
+## ✅ Dependency Matrix (Conflict-Free)
 
-# 4. Strict Dependency Matrix (Resolves NumPy 2.x ABI break, C-compilation failures, CUDA 12 FAISS & ONNX)
-!pip install "numpy<2.0.0" cython setuptools wheel pyworld-prebuilt
-!NO_CUDA=1 pip install --no-build-isolation --no-deps fairseq-fixed rvc-python
-!pip install faiss-gpu-cu12 onnxruntime-gpu || pip install faiss-cpu onnxruntime-gpu
-!pip install hydra-core omegaconf "antlr4-python3-runtime==4.9.3" kokoro soundfile pydub pysrt gradio>=4.44.1 librosa huggingface_hub requests psutil
+| Package | Version | Role | Notes |
+|---|---|---|---|
+| `numpy` | `<2.0.0` | ABI compat guard | Must be first |
+| `infer-rvc-python` | latest | RVC engine | **fairseq-FREE** — no compile hang |
+| `pyworld-prebuilt` | latest | Pitch tools | Pre-built binary — no Cython compile |
+| `onnxruntime-gpu` | latest | RMVPE on CUDA | T4 GPU accelerated |
+| `faiss-gpu-cu12` | latest | Index search | CUDA 12 T4 wheel |
+| `kokoro` | latest | Kokoro-82M TTS | Local, zero API keys |
+| `hydra-core` + `omegaconf` | latest | RVC config | Pure Python |
+| `antlr4-python3-runtime` | `==4.9.3` | Grammar parser | Version-pinned |
 
-# 5. Launch Full AI Dubbing Studio (Generates public .gradio.live link with live logs)
-!python app.py
+> **Why `infer-rvc-python` instead of `rvc-python`?**
+> `rvc-python` depends on `fairseq` which requires C++ Cython compilation → **hangs forever** in Colab.
+> `infer-rvc-python` is a maintained fork with fairseq removed → installs in < 60 seconds.
+
+---
+
+## 📋 Step-by-Step Instructions
+
+### Step 0 — Set GPU Runtime
+`Runtime → Change runtime type → Hardware accelerator → T4 GPU → Save`
+
+### Step 1 — Verify GPU
+Run **Cell 1**: confirms `nvidia-smi` output and asserts `torch.cuda.is_available()`.
+
+### Step 2 — Install Dependencies (~ 3-5 min)
+Run **Cell 2**: installs all packages. Watch for the final line:
 ```
+✅ infer_rvc_python.RVCInference: <class '...'>
+```
+If you see `🚨 infer_rvc_python failed to import!` — read the traceback and fix it before continuing.
+
+### Step 3 — Launch Studio
+Run **Cell 3**: starts `python app.py`.
+- ✅ Generates a public `https://xxxx.gradio.live` link
+- ✅ Streams all pipeline logs to cell output
+- ✅ Saves output audio to `/content/narutogen/outputs/`
+
+> **If you see `infer_rvc_python` ImportError in Cell 3:**
+> `Runtime → Restart runtime` → Skip Cell 2 → Run Cell 3 directly.
+> (pip installs persist across restarts in the same Colab session)
 
 ---
 
-### Cell 1: Clone Repository & Update
+## 🔑 Configure Your RVC Character Model
+
+Edit `dubbing_pipeline.py`, line ~362:
 ```python
-import os
-if not os.path.exists('/content/narutogen'):
-    !git clone https://github.com/adarshraj990/-narutogen.git /content/narutogen
-%cd /content/narutogen
-!git pull origin main
+CONFIGURED_RVC_MODEL_URL = (
+    "https://huggingface.co/YOUR_USERNAME/YOUR_MODEL_REPO/resolve/main/your_model.zip"
+)
 ```
+The ZIP must contain a `.pth` (weights) and optionally a `.index` (feature index) file.
 
 ---
 
-### Cell 2: Install Dependencies & RVC GPU Support (Conflict-Free Matrix)
-```bash
-!apt-get update -qq && apt-get install -y ffmpeg espeak-ng
+## 🧠 Architecture Notes
 
-# 1. Enforce NumPy < 2.0.0 ABI compatibility and install build tools
-!pip install "numpy<2.0.0" cython setuptools wheel pyworld-prebuilt
-
-# 2. Fast install of Fairseq & RVC without triggering source compilation hang
-!NO_CUDA=1 pip install --no-build-isolation --no-deps fairseq-fixed rvc-python
-
-# 3. Install GPU-accelerated FAISS (CUDA 12) & ONNX Runtime GPU (T4 TensorRT/CUDA)
-!pip install faiss-gpu-cu12 onnxruntime-gpu || pip install faiss-cpu onnxruntime-gpu
-
-# 4. Install Fairseq/RVC sub-dependencies, Kokoro Neural TTS & Web UI
-!pip install hydra-core omegaconf "antlr4-python3-runtime==4.9.3" kokoro soundfile pydub pysrt gradio>=4.44.1 librosa huggingface_hub requests psutil
+```
+SRT File
+   └─→ [Kokoro-82M TTS]     → per-cue WAV (24kHz, mono)
+          └─→ [RVC RMVPE]   → character voice WAV (16kHz in, 44.1kHz out)
+                 └─→ [FFmpeg] → time-synced master WAV
 ```
 
----
-
-### Cell 3: Download & Setup Configured RVC Model (Optional Standalone)
-Automatically downloads the configured RVC model (CarryMinati / Naruto / custom voice) from Hugging Face into `models/character/` and `weights/` (the Web UI will also auto-download if missing):
-```bash
-!python -m modules.model_downloader
-```
-
----
-
-### Cell 4: Launch Minimalist Gradio Web UI
-```bash
-!python dubbing_pipeline.py
-```
-*Click the public `https://xxxx.gradio.live` link generated in the terminal to upload your `.srt` file, set video duration, select your desired languages (Hindi, Spanish, French, Portuguese), and click **Start Dubbing**!*
-
----
-
-### 🌐 Deploying to Hugging Face Spaces
-1. Create a new Space on [Hugging Face](https://huggingface.co/new-space) (SDK: **Gradio**, Hardware: **Free CPU / Zero-GPU / T4 Small**).
-2. Connect your GitHub repository `https://github.com/adarshraj990/-narutogen` or push the files directly.
-3. Hugging Face Spaces will automatically launch `app.py`. The built-in 5-minute chunking engine guarantees safe execution without running into 16GB RAM Out-of-Memory (OOM) errors even on 2-hour long files!
+- **5-min chunking** prevents OOM on 2-hour videos
+- **Sequential multi-language** processing (Hindi → Spanish → French → Portuguese)
+- **`torch.cuda.empty_cache()` + `gc.collect()`** after every chunk
+- **No silent fallbacks** — every error raises loudly with full traceback
