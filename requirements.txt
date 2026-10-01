@@ -22,7 +22,8 @@ tqdm
 # Kokoro-82M Local Neural TTS (100% Local, Offline, No API Keys)
 kokoro
 
-# RVC Runtime Dependencies & Pitch Tools
+# RVC Runtime Dependencies & Pitch Tools (CUDA Accelerated)
+onnxruntime-gpu
 torchcrepe
 faiss-cpu
 av>=11.0.0

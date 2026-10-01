@@ -106,21 +106,25 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-import threading
 from dubbing_pipeline import build_ui, CONFIGURED_RVC_MODEL_URL, launch_gradio_app, ensure_rvc_dependencies
 
-# Proactively warm up RVC dependencies in background on startup
+# Synchronous dependency verification (removes detached daemon thread for Colab compatibility)
+is_colab_env = "google.colab" in sys.modules or os.path.exists("/content")
 try:
-    threading.Thread(target=ensure_rvc_dependencies, daemon=True).start()
-except Exception:
-    pass
+    ensure_rvc_dependencies()
+except Exception as e:
+    print(f"ℹ️ [STARTUP] RVC dependency verification notice: {e}")
 
-# Hugging Face Spaces detects demo at module level
+# Gradio Interface
 demo = build_ui()
 
 if __name__ == "__main__":
     print("\n" + "=" * 80)
-    print("🚀 [HUGGING FACE SPACES / WEB APP] Launching AI Dubbing Interface...")
+    if is_colab_env:
+        print("🚀 [GOOGLE COLAB T4 GPU] Launching AI Dubbing Studio...")
+    else:
+        print("🚀 [AI DUBBING STUDIO] Launching AI Dubbing Studio...")
     print(f"🎙️ Configured Backend RVC Model: {CONFIGURED_RVC_MODEL_URL}")
     print("=" * 80 + "\n")
     launch_gradio_app(demo)
+

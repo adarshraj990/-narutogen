@@ -309,8 +309,52 @@ except Exception:
 
 
 # ==================================================================================================
-# 2. GLOBAL CONFIGURATION & RVC MODEL PLACEHOLDER
+# 2. GLOBAL CONFIGURATION, COLAB PATH RESOLUTION & HARDWARE ACCELERATION
 # ==================================================================================================
+# Environment Detection (Google Colab T4 vs Hugging Face Spaces vs Local)
+IS_COLAB = "google.colab" in sys.modules or os.path.exists("/content")
+
+if IS_COLAB:
+    BASE_CONTENT_DIR = Path("/content").resolve()
+    OUTPUT_BASE_DIR = BASE_CONTENT_DIR / "outputs"
+    MODELS_BASE_DIR = BASE_CONTENT_DIR / "models"
+    WEIGHTS_BASE_DIR = BASE_CONTENT_DIR / "weights"
+    LOGS_BASE_DIR = BASE_CONTENT_DIR / "logs"
+else:
+    BASE_CONTENT_DIR = Path.cwd().resolve()
+    OUTPUT_BASE_DIR = BASE_CONTENT_DIR / "outputs"
+    MODELS_BASE_DIR = BASE_CONTENT_DIR / "models"
+    WEIGHTS_BASE_DIR = BASE_CONTENT_DIR / "weights"
+    LOGS_BASE_DIR = BASE_CONTENT_DIR / "logs"
+
+OUTPUT_BASE_DIR.mkdir(parents=True, exist_ok=True)
+MODELS_BASE_DIR.mkdir(parents=True, exist_ok=True)
+WEIGHTS_BASE_DIR.mkdir(parents=True, exist_ok=True)
+LOGS_BASE_DIR.mkdir(parents=True, exist_ok=True)
+
+# Hardware Acceleration Probing (PyTorch CUDA + ONNX Runtime CUDAExecutionProvider)
+try:
+    import torch
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True
+        _gpu_name = torch.cuda.get_device_name(0)
+        _total_vram = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+        print(f"🚀 [CUDA ACCELERATION] Active GPU: {_gpu_name} ({_total_vram:.1f} GB VRAM)")
+    else:
+        print("ℹ️ [CUDA NOTICE] CUDA device not detected. Operating in CPU mode.")
+except Exception:
+    pass
+
+try:
+    import onnxruntime as ort
+    _ort_providers = ort.get_available_providers()
+    if "CUDAExecutionProvider" in _ort_providers:
+        print("⚡ [ONNX RUNTIME GPU] CUDAExecutionProvider active for RMVPE pitch extraction!")
+    else:
+        print(f"ℹ️ [ONNX RUNTIME] Active execution providers: {_ort_providers}")
+except Exception:
+    pass
+
 # 📌 [INSERT RVC MODEL DOWNLOAD LINK HERE]:
 # Paste your direct Hugging Face or direct download link (.zip containing .pth and .index) below.
 # The pipeline automatically downloads and extracts it into models/character/ and weights/.
@@ -551,10 +595,21 @@ def ensure_character_model(
 ) -> Dict[str, str]:
     """Ensures character model exists locally; downloads and extracts if missing."""
     url = normalize_huggingface_url(url)
-    root = Path(project_root).resolve() if project_root else Path.cwd().resolve()
-    models_dir = root / "models" / "character"
-    weights_dir = root / "weights"
-    logs_dir = root / "logs" / "character"
+    if project_root:
+        root = Path(project_root).resolve()
+        models_dir = root / "models" / "character"
+        weights_dir = root / "weights"
+        logs_dir = root / "logs" / "character"
+    elif IS_COLAB:
+        root = BASE_CONTENT_DIR
+        models_dir = MODELS_BASE_DIR / "character"
+        weights_dir = WEIGHTS_BASE_DIR
+        logs_dir = LOGS_BASE_DIR / "character"
+    else:
+        root = Path.cwd().resolve()
+        models_dir = root / "models" / "character"
+        weights_dir = root / "weights"
+        logs_dir = root / "logs" / "character"
 
     primary_pth = models_dir / "character.pth"
     primary_index = models_dir / "character.index"
@@ -564,11 +619,17 @@ def ensure_character_model(
             primary_pth,
             weights_dir / "character.pth",
             root / "models" / "naruto" / "naruto.pth",
+            MODELS_BASE_DIR / "character" / "character.pth",
+            WEIGHTS_BASE_DIR / "character.pth",
         ]
         if weights_dir.exists():
             pth_candidates.extend(list(weights_dir.glob("*.pth")))
         if (root / "models").exists():
             pth_candidates.extend(list((root / "models").rglob("*.pth")))
+        if MODELS_BASE_DIR.exists():
+            pth_candidates.extend(list(MODELS_BASE_DIR.rglob("*.pth")))
+        if WEIGHTS_BASE_DIR.exists():
+            pth_candidates.extend(list(WEIGHTS_BASE_DIR.glob("*.pth")))
 
         for cand in pth_candidates:
             if cand.exists() and cand.stat().st_size > 10_000_000:
@@ -583,7 +644,7 @@ def ensure_character_model(
                     "logs_path": str(logs_dir),
                 }
 
-    temp_dir = root / "models" / "temp_download"
+    temp_dir = models_dir.parent / "temp_download"
     temp_dir.mkdir(parents=True, exist_ok=True)
     zip_dest = temp_dir / "rvc_model.zip"
 
@@ -816,10 +877,19 @@ def get_kokoro_pipeline(lang_code: str = "h") -> Any:
                 "Please run: pip install kokoro soundfile"
             )
 
-    print(f"📦 [KOKORO TTS] Initializing Kokoro-82M pipeline for language '{lang_code}'...")
-    pipeline = KPipeline(lang_code=lang_code)
+    device = "cuda" if (torch and torch.cuda.is_available()) else "cpu"
+    print(f"📦 [KOKORO TTS] Initializing Kokoro-82M pipeline for language '{lang_code}' targeting {device.upper()}...")
+    try:
+        pipeline = KPipeline(lang_code=lang_code, device=device)
+    except TypeError:
+        pipeline = KPipeline(lang_code=lang_code)
+        if hasattr(pipeline, "model") and hasattr(pipeline.model, "to"):
+            try:
+                pipeline.model.to(device)
+            except Exception:
+                pass
     _KOKORO_PIPELINES[lang_code] = pipeline
-    print(f"✅ [KOKORO TTS] Pipeline ready for language '{lang_code}'.")
+    print(f"✅ [KOKORO TTS] Pipeline ready on {device.upper()} for language '{lang_code}'.")
     return pipeline
 
 
@@ -953,41 +1023,44 @@ def ensure_rvc_dependencies() -> bool:
             return True
         except Exception as import_err:
             import traceback
-            print(f"\n💡 [RVC PROBE] Initial direct import failed ({import_err}). Starting dependency resolution...")
+            print(f"\n💡 [RVC PROBE] Initial direct import failed ({import_err}). Starting dependency check...")
             traceback.print_exc()
 
-        # Attempt 2: Auto-install with pip (Requirement 1: Enforce correct versions)
-        print("⚡ [RVC SETUP] Installing RVC runtime modules (Requirement 1)...")
-        install_commands = [
-            [sys.executable, "-m", "pip", "install", "-q", "--no-deps", "fairseq-fixed", "pyworld-fixed", "rvc-python"],
-            [sys.executable, "-m", "pip", "install", "-q", "numpy<2.0.0", "bitarray", "cython", "regex", "sacrebleu>=1.4.12", "scikit-learn", "cffi", "tqdm", "hydra-core", "omegaconf", "antlr4-python3-runtime==4.9.3", "faiss-cpu"],
-        ]
-        for cmd in install_commands:
-            cmd_str = " ".join(cmd[3:])
+        if not IS_COLAB:
+            # Attempt 2: Auto-install with clean pip (Local / Server fallback without --no-deps hacks)
+            print("⚡ [RVC SETUP] Installing RVC runtime modules cleanly...")
+            clean_packages = [
+                "fairseq-fixed", "pyworld-fixed", "rvc-python",
+                "hydra-core", "omegaconf", "antlr4-python3-runtime==4.9.3",
+                "faiss-cpu", "soundfile", "pydub"
+            ]
             try:
-                print(f"📦 [RVC SETUP] Running: pip {cmd_str}")
+                cmd = [sys.executable, "-m", "pip", "install", "-q"] + clean_packages
+                print(f"📦 [RVC SETUP] Running: pip install {' '.join(clean_packages)}")
                 subprocess.run(cmd, check=True)
             except Exception as cmd_err:
                 import traceback
                 print(f"💡 [RVC SETUP NOTICE] {cmd_err}")
                 traceback.print_exc()
 
-        # Apply disk and in-memory patches immediately after pip installation
-        _patch_fairseq_registry()
-        _patch_tensorboard_for_fairseq()
+            # Apply disk and in-memory patches immediately after pip installation
+            _patch_fairseq_registry()
+            _patch_tensorboard_for_fairseq()
 
-        try:
-            from rvc_python.infer import RVCInference as _RVCClass  # type: ignore
-            RVCInference = _RVCClass
-            RVC_AVAILABLE = True
-            print("✅ [RVC SETUP] 'rvc-python' installed and verified successfully!")
-            return True
-        except Exception as cmd_err:
-            import traceback
-            print("\n" + "!" * 70)
-            print(f"🚨 [RVC IMPORT FAILURE] rvc_python failed to load: {cmd_err}")
-            traceback.print_exc()
-            print("!" * 70 + "\n")
+            try:
+                from rvc_python.infer import RVCInference as _RVCClass  # type: ignore
+                RVCInference = _RVCClass
+                RVC_AVAILABLE = True
+                print("✅ [RVC SETUP] 'rvc-python' installed and verified successfully!")
+                return True
+            except Exception as cmd_err:
+                import traceback
+                print("\n" + "!" * 70)
+                print(f"🚨 [RVC IMPORT FAILURE] rvc_python failed to load: {cmd_err}")
+                traceback.print_exc()
+                print("!" * 70 + "\n")
+        else:
+            print("💡 [COLAB NOTE] Please run the notebook's initial '!pip install' cell to install RVC dependencies.")
 
         print("💡 [RVC NOTICE] RVC dependencies could not be loaded in current environment. Falling back to base Kokoro TTS.")
         return False
@@ -1022,10 +1095,18 @@ class CharacterVoiceConverter:
         # Auto-detect character model or download from model_url
         if not self.model_path or not os.path.exists(self.model_path):
             candidates = [
+                MODELS_BASE_DIR / "character" / "character.pth",
+                MODELS_BASE_DIR / "character.pth",
+                WEIGHTS_BASE_DIR / "character.pth",
+                MODELS_BASE_DIR / "naruto" / "naruto.pth",
                 Path("models/character/character.pth"),
                 Path("weights/character.pth"),
                 Path("models/naruto/naruto.pth"),
             ]
+            if WEIGHTS_BASE_DIR.exists():
+                candidates.extend(list(WEIGHTS_BASE_DIR.glob("*.pth")))
+            if MODELS_BASE_DIR.exists():
+                candidates.extend(list(MODELS_BASE_DIR.rglob("*.pth")))
             if Path("weights").exists():
                 candidates.extend(list(Path("weights").glob("*.pth")))
             if Path("models").exists():
@@ -1093,7 +1174,12 @@ class CharacterVoiceConverter:
             device = "cuda:0"
             try:
                 import torch  # type: ignore
-                if not torch.cuda.is_available():
+                if torch.cuda.is_available():
+                    device = "cuda:0"
+                    gpu_name = torch.cuda.get_device_name(0)
+                    total_vram = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+                    print(f"🚀 [RVC CUDA ACCELERATION] Loading RVC on GPU {gpu_name} (device={device}, VRAM={total_vram:.1f} GB)")
+                else:
                     device = "cpu"
                     print("⚠️ [RVC NOTICE] CUDA unavailable, running RVC on CPU.")
             except Exception:
@@ -1415,7 +1501,7 @@ def process_single_language_chunked(
 # ==================================================================================================
 def run_sequential_multi_language_pipeline(
     srt_file: str,
-    output_dir: str = "./outputs",
+    output_dir: Optional[str] = None,
     hours: int = 0,
     minutes: int = 0,
     seconds: int = 48,
@@ -1436,13 +1522,15 @@ def run_sequential_multi_language_pipeline(
     if not selected_languages:
         selected_languages = ["Hindi"]
 
+    if not output_dir:
+        output_dir = str(OUTPUT_BASE_DIR)
     out_base = Path(output_dir).resolve()
     out_base.mkdir(parents=True, exist_ok=True)
     work_dir = Path(tempfile.gettempdir()) / f"dub_run_{int(time.time())}"
     work_dir.mkdir(parents=True, exist_ok=True)
 
     print("\n" + "=" * 75)
-    print("🍥 SEQUENTIAL MULTI-LANGUAGE DUBBING PIPELINE (HUGGING FACE SPACES)")
+    print(f"🍥 SEQUENTIAL MULTI-LANGUAGE DUBBING PIPELINE ({'GOOGLE COLAB T4' if IS_COLAB else 'HUGGING FACE SPACES'})")
     print("=" * 75)
     print(f"Subtitles:        {srt_file}")
     print(f"Output Directory: {out_base}")
@@ -1516,7 +1604,7 @@ def run_sequential_multi_language_pipeline(
 # ==================================================================================================
 # 10. PERSISTENT STORAGE HELPERS & SESSION-INDEPENDENT FILE BROWSER
 # ==================================================================================================
-OUTPUT_BASE_DIR = Path("./outputs").resolve()
+# OUTPUT_BASE_DIR is configured in Section 2 (targeting /content/outputs on Google Colab)
 OUTPUT_BASE_DIR.mkdir(parents=True, exist_ok=True)
 PIPELINE_LOG_FILE = OUTPUT_BASE_DIR / "pipeline_execution.log"
 
@@ -1595,10 +1683,11 @@ def generate_file_browser_state():
     """
     files = get_persisted_output_files()
     dropdown_update_empty = gr.update(choices=[], value=None) if (GRADIO_AVAILABLE and gr is not None) else []
+    output_display = f"{OUTPUT_BASE_DIR.as_posix()}/"
     if not files:
-        empty_md = """
+        empty_md = f"""
 <div class="status-card" style="text-align: center; padding: 24px;">
-    <h4>📭 No output files found in <code>./outputs/</code></h4>
+    <h4>📭 No output files found in <code>{output_display}</code></h4>
     <p style="color: #94a3b8; font-size: 0.95rem; margin-top: 6px;">
         Generate your first dubbed master in the <b>🎙️ Dubbing Studio</b> tab.<br>
         All completed files are permanently saved to disk and will appear here across sessions.
@@ -1626,7 +1715,7 @@ def generate_file_browser_state():
             continue
 
     table_md = f"""
-### 📁 Available Master Outputs ({len(files)} files in `./outputs/`)
+### 📁 Available Master Outputs ({len(files)} files in `{output_display}`)
 
 | File Name | File Size | Audio Duration | Generated At |
 | :--- | :--- | :--- | :--- |
@@ -1897,10 +1986,11 @@ def build_ui():
             # TAB 1: 🎙️ Dubbing Studio
             # ------------------------------------------------------------------
             with gr.Tab("🎙️ Dubbing Studio", id="tab_studio"):
+                output_folder_display = f"{OUTPUT_BASE_DIR.as_posix()}/"
                 gr.HTML(
-                    """
+                    f"""
                     <div class="fire-forget-banner">
-                        ⚡ <b>Fire-and-Forget Background Processing:</b> Output audio files are saved directly to <code>./outputs/</code> on the server. If your browser disconnects, tab refreshes, or is closed, processing continues safely in the background. Completed files remain accessible anytime in the <b>📁 Output Files & Downloads</b> tab.
+                        ⚡ <b>Persistent Storage:</b> Output audio files are saved directly to <code>{output_folder_display}</code> on the server. Completed files remain accessible anytime in the <b>📁 Output Files & Downloads</b> tab.
                     </div>
                     """
                 )
@@ -1961,13 +2051,13 @@ def build_ui():
             # ------------------------------------------------------------------
             with gr.Tab("📁 Output Files & Downloads", id="tab_outputs"):
                 gr.HTML(
-                    """
+                    f"""
                     <div class="file-browser-card">
                         <div style="font-size: 1.15rem; font-weight: 700; color: #ff8c00; margin-bottom: 4px;">
                             📂 Persistent Storage & File Browser
                         </div>
                         <div style="color: #94a3b8; font-size: 0.92rem;">
-                            All dubbed master files saved to <code>./outputs/</code> are indexed below. Access, preview, and download your files anytime across browser sessions and tab refreshes.
+                            All dubbed master files saved to <code>{output_folder_display}</code> are indexed below. Access, preview, and download your files anytime across browser sessions and tab refreshes.
                         </div>
                     </div>
                     """
@@ -1977,7 +2067,7 @@ def build_ui():
                     refresh_btn = gr.Button("🔄 Refresh Output Files", variant="secondary", elem_classes="btn-refresh")
                     clear_btn = gr.Button("🗑️ Clear Output Files", variant="stop", size="sm")
 
-                browser_table = gr.Markdown("Scanning `./outputs/`...")
+                browser_table = gr.Markdown(f"Scanning `{output_folder_display}`...")
 
                 gr.Markdown("### 🎧 Audio Preview & Individual Download")
                 with gr.Row():
@@ -2101,13 +2191,28 @@ CUSTOM_RVC_MODEL_DOWNLOAD_URL = CONFIGURED_RVC_MODEL_URL
 def launch_gradio_app(demo_app):
     """
     Robust Gradio launcher that seamlessly handles:
-    1. Hugging Face Spaces (native zero-config launch)
-    2. Google Colab (public shareable link https://xxxx.gradio.live)
+    1. Google Colab (Requirement 3: share=True, debug=True, inline=False to stream logs directly to cell output)
+    2. Hugging Face Spaces (native zero-config launch)
     3. Localhost / Remote Server with automatic fallback
     """
     is_hf_space = os.getenv("SPACE_ID") is not None or os.getenv("SYSTEM") == "spaces"
 
-    # Strategy 1: Hugging Face Spaces native launch (HF handles port/routing internally)
+    # Strategy 1: Google Colab Environment (Requirement 3: share=True and debug=True)
+    if IS_COLAB:
+        print("\n" + "=" * 80)
+        print("🚀 [COLAB LAUNCH] Google Colab T4 GPU environment detected!")
+        print("🔗 Launching with share=True and debug=True for public URL and live log streaming...")
+        print("📺 Notebook cell will remain actively running and stream logs in real-time.")
+        print("=" * 80 + "\n")
+        demo_app.queue().launch(
+            share=True,
+            debug=True,
+            inline=False,
+            show_error=True,
+        )
+        return
+
+    # Strategy 2: Hugging Face Spaces native launch (HF handles port/routing internally)
     if is_hf_space:
         try:
             print("🌐 [LAUNCH] Detected Hugging Face Spaces environment. Launching native interface...")
@@ -2116,18 +2221,19 @@ def launch_gradio_app(demo_app):
         except Exception as e:
             print(f"💡 [LAUNCH] HF Space native launch notice: {e}. Retrying with public link...")
 
-    # Strategy 2: Google Colab & Remote environments (share=True creates public https://xxxx.gradio.live link)
+    # Strategy 3: Colab / Remote fallback (share=True with debug=True)
     try:
         print("🌐 [LAUNCH] Launching with share=True for Colab / Remote browser access...")
         demo_app.queue().launch(
             share=True,
+            debug=True,
             show_error=True,
         )
         return
     except Exception as err:
         print(f"⚠️ [LAUNCH] share=True notice ({err}). Retrying with local server...")
 
-    # Strategy 3: Standard local fallback
+    # Strategy 4: Standard local fallback
     try:
         demo_app.queue().launch(
             share=False,
@@ -2135,7 +2241,7 @@ def launch_gradio_app(demo_app):
         )
     except Exception as err2:
         print(f"⚠️ [LAUNCH] Local launch notice ({err2}). Attempting forced share=True...")
-        demo_app.queue().launch(share=True)
+        demo_app.queue().launch(share=True, debug=True)
 
 
 if __name__ == "__main__":
