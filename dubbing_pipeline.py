@@ -255,6 +255,30 @@ def _patch_fairseq_registry():
             except Exception:
                 pass
 
+    # 3. Patch fairseq/criterions/__init__.py and fairseq/tasks/__init__.py to safely ignore unused broken modules
+    for base in set(candidate_paths):
+        fs_parent = os.path.dirname(base)
+        for subpkg in ["criterions", "tasks"]:
+            sub_init = os.path.join(fs_parent, subpkg, "__init__.py")
+            if os.path.isfile(sub_init):
+                try:
+                    with open(sub_init, "r", encoding="utf-8") as f:
+                        sub_content = f.read()
+                    target_line = f'importlib.import_module("fairseq.{subpkg}." + file_name)'
+                    safe_block = (
+                        f"try:\n"
+                        f"            importlib.import_module('fairseq.{subpkg}.' + file_name)\n"
+                        f"        except Exception:\n"
+                        f"            pass"
+                    )
+                    if target_line in sub_content and safe_block not in sub_content:
+                        sub_content = sub_content.replace(target_line, safe_block)
+                        with open(sub_init, "w", encoding="utf-8") as f:
+                            f.write(sub_content)
+                        print(f"🔧 [FAIRSEQ PATCH] Made fairseq/{subpkg}/__init__.py error-resilient.")
+                except Exception:
+                    pass
+
 _patch_fairseq_registry()
 _patch_tensorboard_for_fairseq()
 
@@ -936,7 +960,7 @@ def ensure_rvc_dependencies() -> bool:
         print("⚡ [RVC SETUP] Installing RVC runtime modules (Requirement 1)...")
         install_commands = [
             [sys.executable, "-m", "pip", "install", "-q", "--no-deps", "fairseq-fixed", "pyworld-fixed", "rvc-python"],
-            [sys.executable, "-m", "pip", "install", "-q", "numpy<2.0.0", "torch", "torchaudio", "faiss-cpu", "hydra-core", "omegaconf", "antlr4-python3-runtime==4.9.3"],
+            [sys.executable, "-m", "pip", "install", "-q", "numpy<2.0.0", "bitarray", "cython", "regex", "sacrebleu>=1.4.12", "scikit-learn", "cffi", "tqdm", "hydra-core", "omegaconf", "antlr4-python3-runtime==4.9.3", "faiss-cpu"],
         ]
         for cmd in install_commands:
             cmd_str = " ".join(cmd[3:])

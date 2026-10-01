@@ -9,6 +9,14 @@ setuptools
 antlr4-python3-runtime==4.9.3
 omegaconf
 hydra-core
+bitarray
+cython
+regex
+sacrebleu>=1.4.12
+scikit-learn
+cffi
+tqdm
+
 
 
 # Kokoro-82M Local Neural TTS (100% Local, Offline, No API Keys)
