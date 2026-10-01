@@ -799,13 +799,13 @@ def ensure_rvc_dependencies() -> bool:
         # Attempt 2: Auto-install with --no-deps for Hugging Face Spaces / Linux
         print("⚡ [RVC SETUP] Installing RVC runtime modules with --no-deps (bypassing omegaconf conflict)...")
         install_commands = [
+            [sys.executable, "-m", "pip", "install", "-q", "antlr4-python3-runtime==4.9.3", "omegaconf"],
             [sys.executable, "-m", "pip", "install", "-q", "--no-deps", "fairseq-fixed", "pyworld-fixed", "rvc-python"],
             [sys.executable, "-m", "pip", "install", "-q", "--no-deps", "rvc-python"],
-            [sys.executable, "-m", "pip", "install", "-q", "scipy"],
         ]
         for cmd in install_commands:
+            cmd_str = " ".join(cmd[3:])
             try:
-                cmd_str = " ".join(cmd[3:])
                 print(f"📦 [RVC SETUP] Running: pip {cmd_str}")
                 subprocess.run(cmd, check=True)
                 _patch_tensorboard_for_fairseq()

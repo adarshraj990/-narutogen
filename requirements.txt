@@ -6,6 +6,8 @@ librosa>=0.10.1
 numpy
 scipy
 setuptools
+antlr4-python3-runtime==4.9.3
+omegaconf
 
 # Kokoro-82M Local Neural TTS (100% Local, Offline, No API Keys)
 kokoro
