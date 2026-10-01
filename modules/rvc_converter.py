@@ -64,6 +64,17 @@ def _patch_tensorboard_for_fairseq():
             mock_mod.FileWriter = MagicMock
             sys.modules[mod] = mock_mod
 
+def _patch_fairseq_registry():
+    """Prevents FairSeq setup_registry NoneType unpacking crash."""
+    if "fairseq.registry" in sys.modules:
+        reg_mod = sys.modules["fairseq.registry"]
+        if hasattr(reg_mod, "REGISTRIES") and isinstance(reg_mod.REGISTRIES, dict):
+            try:
+                reg_mod.REGISTRIES.clear()
+            except Exception:
+                pass
+
+_patch_fairseq_registry()
 _patch_tensorboard_for_fairseq()
 
 try:
@@ -82,6 +93,8 @@ except ImportError:
 
 # Try importing RVC Inference libraries (rvc_python.infer exports RVCInference)
 try:
+    _patch_fairseq_registry()
+    _patch_tensorboard_for_fairseq()
     from rvc_python.infer import RVCInference
     RVC_AVAILABLE = True
 except Exception as _rvc_err:

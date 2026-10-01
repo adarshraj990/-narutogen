@@ -191,6 +191,77 @@ def _patch_tensorboard_for_fairseq():
             mock_mod.FileWriter = MagicMock
             sys.modules[mod] = mock_mod
 
+def _patch_fairseq_registry():
+    """
+    Prevents FairSeq's 'TypeError: cannot unpack non-iterable NoneType object' crash.
+    In FairSeq's registry.py, setup_registry returns None when a registry is re-evaluated,
+    which crashes callers expecting a 4-tuple (build_x, register_x, REGISTRY, DATACLASS_REGISTRY).
+    """
+    # 1. Clear any in-memory partially loaded registries
+    if "fairseq.registry" in sys.modules:
+        reg_mod = sys.modules["fairseq.registry"]
+        if hasattr(reg_mod, "REGISTRIES") and isinstance(reg_mod.REGISTRIES, dict):
+            try:
+                reg_mod.REGISTRIES.clear()
+            except Exception:
+                pass
+
+    # 2. Patch registry.py on disk across all site-packages directories
+    candidate_paths = []
+    try:
+        import site
+        for sp in site.getsitepackages():
+            candidate_paths.append(os.path.join(sp, "fairseq", "registry.py"))
+    except Exception:
+        pass
+    for p in sys.path:
+        candidate_paths.append(os.path.join(p, "fairseq", "registry.py"))
+
+    for reg_path in set(candidate_paths):
+        if os.path.isfile(reg_path):
+            try:
+                with open(reg_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+
+                bad_code = "if registry_name in REGISTRIES:\n        return  # registry already exists"
+                good_code = (
+                    "if registry_name in REGISTRIES:\n"
+                    "        entry = REGISTRIES[registry_name]\n"
+                    "        return entry.get('build_x'), entry.get('register_x'), entry.get('registry', {}), entry.get('dataclass_registry', {})"
+                )
+                bad_store = (
+                    'REGISTRIES[registry_name] = {\n'
+                    '        "registry": REGISTRY,\n'
+                    '        "default": default,\n'
+                    '        "dataclass_registry": DATACLASS_REGISTRY,\n'
+                    '    }'
+                )
+                good_store = (
+                    'REGISTRIES[registry_name] = {\n'
+                    '        "registry": REGISTRY,\n'
+                    '        "default": default,\n'
+                    '        "dataclass_registry": DATACLASS_REGISTRY,\n'
+                    '        "build_x": build_x,\n'
+                    '        "register_x": register_x,\n'
+                    '    }'
+                )
+
+                modified = False
+                if bad_code in content:
+                    content = content.replace(bad_code, good_code)
+                    modified = True
+                if bad_store in content:
+                    content = content.replace(bad_store, good_store)
+                    modified = True
+
+                if modified:
+                    with open(reg_path, "w", encoding="utf-8") as f:
+                        f.write(content)
+                    print(f"🔧 [FAIRSEQ PATCH] Patched {reg_path} to prevent NoneType unpacking crash.")
+            except Exception:
+                pass
+
+_patch_fairseq_registry()
 _patch_tensorboard_for_fairseq()
 
 # PyTorch 2.6+ weights_only compatibility patch for RVC checkpoints
@@ -209,6 +280,8 @@ except Exception:
 RVCInference: Any = None
 RVC_AVAILABLE = False
 try:
+    _patch_fairseq_registry()
+    _patch_tensorboard_for_fairseq()
     from rvc_python.infer import RVCInference as _RVCClass  # type: ignore
     RVCInference = _RVCClass
     RVC_AVAILABLE = True
@@ -786,9 +859,12 @@ def ensure_rvc_dependencies() -> bool:
         if RVC_AVAILABLE and RVCInference is not None:
             return True
 
+        # Pre-patch Fairseq registry and TensorBoard shims
+        _patch_fairseq_registry()
+        _patch_tensorboard_for_fairseq()
+
         # Attempt 1: Direct import
         try:
-            _patch_tensorboard_for_fairseq()
             from rvc_python.infer import RVCInference as _RVCClass  # type: ignore
             RVCInference = _RVCClass
             RVC_AVAILABLE = True
@@ -796,40 +872,32 @@ def ensure_rvc_dependencies() -> bool:
         except Exception as import_err:
             print(f"💡 [RVC PROBE] Initial rvc_python import probe notice: {import_err}")
 
-        # Attempt 2: Auto-install with --no-deps for Hugging Face Spaces / Linux
-        print("⚡ [RVC SETUP] Installing RVC runtime modules (antlr4, omegaconf, hydra-core)...")
-        try:
-            subprocess.run(
-                [sys.executable, "-m", "pip", "install", "-q", "antlr4-python3-runtime==4.9.3", "omegaconf", "hydra-core"],
-                check=False,
-            )
-            _patch_tensorboard_for_fairseq()
-            from rvc_python.infer import RVCInference as _RVCClass  # type: ignore
-            RVCInference = _RVCClass
-            RVC_AVAILABLE = True
-            print("✅ [RVC SETUP] 'rvc-python' loaded successfully after runtime prerequisites!")
-            return True
-        except Exception:
-            pass
-
+        # Attempt 2: Auto-install with pip (installing fairseq/rvc with --no-deps + hydra-core, omegaconf, antlr4)
+        print("⚡ [RVC SETUP] Installing RVC runtime modules (fairseq, rvc-python, hydra-core, omegaconf)...")
         install_commands = [
             [sys.executable, "-m", "pip", "install", "-q", "--no-deps", "fairseq-fixed", "pyworld-fixed", "rvc-python"],
-            [sys.executable, "-m", "pip", "install", "-q", "--no-deps", "rvc-python"],
+            [sys.executable, "-m", "pip", "install", "-q", "antlr4-python3-runtime==4.9.3", "omegaconf", "hydra-core"],
         ]
         for cmd in install_commands:
             cmd_str = " ".join(cmd[3:])
             try:
                 print(f"📦 [RVC SETUP] Running: pip {cmd_str}")
                 subprocess.run(cmd, check=True)
-                _patch_tensorboard_for_fairseq()
-                from rvc_python.infer import RVCInference as _RVCClass  # type: ignore
-                RVCInference = _RVCClass
-                RVC_AVAILABLE = True
-                print("✅ [RVC SETUP] 'rvc-python' installed and verified successfully!")
-                return True
             except Exception as cmd_err:
                 print(f"💡 [RVC SETUP NOTICE] {cmd_err}")
-                continue
+
+        # Apply disk and in-memory patches immediately after pip installation
+        _patch_fairseq_registry()
+        _patch_tensorboard_for_fairseq()
+
+        try:
+            from rvc_python.infer import RVCInference as _RVCClass  # type: ignore
+            RVCInference = _RVCClass
+            RVC_AVAILABLE = True
+            print("✅ [RVC SETUP] 'rvc-python' installed and verified successfully!")
+            return True
+        except Exception as cmd_err:
+            print(f"💡 [RVC SETUP NOTICE] {cmd_err}")
 
         print("💡 [RVC NOTICE] RVC dependencies could not be loaded in current environment (CPU/Windows missing C++ wheels). Falling back to base Kokoro TTS.")
         return False
