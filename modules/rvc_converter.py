@@ -16,7 +16,10 @@ import gc
 import sys
 import time
 import shutil
+import traceback as _traceback
 from pathlib import Path
+
+import numpy as np
 from typing import List, Tuple, Dict, Any, Optional, Union
 
 if sys.platform.startswith("win"):
@@ -242,12 +245,13 @@ class RVCBatchConverter:
         print("=" * 65)
 
         if not RVC_AVAILABLE:
-            print(
-                "⚠️ [RVC NOTICE] 'rvc-python' is not installed in the local environment.\n"
-                "   Operating in baseline audio verification mode (passthrough)."
+            raise RuntimeError(
+                "\n" + "!" * 80 + "\n"
+                "🚨 [RVC FATAL] 'rvc-python' is NOT installed or failed to import!\n"
+                "   Silent passthrough / fallback is permanently DISABLED.\n"
+                "   Run the Colab Step-2 cell to install all dependencies, then restart the runtime.\n"
+                + "!" * 80 + "\n"
             )
-            self._is_ready = False
-            return
 
         try:
             # Instantiate persistent RVC Inference engine
@@ -277,10 +281,13 @@ class RVCBatchConverter:
     def convert_single_file(self, input_wav: str, output_wav: str) -> bool:
         """
         Converts a single audio file using RVC with Mono Audio Handshake and rmvpe.
+        Silent passthrough is permanently DISABLED — raises RuntimeError if engine is not ready.
         """
         if not self._is_ready or not self.engine:
-            shutil.copyfile(input_wav, output_wav)
-            return True
+            raise RuntimeError(
+                f"🚨 [RVC ERROR] Cannot convert '{Path(input_wav).name}': RVC Engine is not initialized!\n"
+                "   Silent passthrough / fallback is permanently DISABLED."
+            )
 
         clean_temp_wav = Path(input_wav).with_name(f"{Path(input_wav).stem}_mono16k.wav")
         try:
@@ -318,13 +325,12 @@ class RVCBatchConverter:
                 )
             return True
         except Exception as e:
-            import traceback
             print("\n" + "!" * 70)
             print(f"🚨 [RVC CONVERSION ERROR] Failed for {Path(input_wav).name}: {e}")
-            traceback.print_exc()
+            _traceback.print_exc()
             print("!" * 70 + "\n")
-            shutil.copyfile(input_wav, output_wav)
-            return False
+            # NO silent copyfile fallback — re-raise so caller sees the real error
+            raise RuntimeError(f"RVC audio conversion failed on {Path(input_wav).name}: {e}")
         finally:
             if clean_temp_wav.exists():
                 clean_temp_wav.unlink(missing_ok=True)

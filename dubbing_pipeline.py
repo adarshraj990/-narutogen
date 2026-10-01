@@ -1130,12 +1130,11 @@ def ensure_rvc_dependencies() -> bool:
         except Exception as cmd_err:
             import traceback
             print("\n" + "!" * 80)
-            print(f"🚨 [RVC IMPORT FAILURE] rvc_python failed to load: {cmd_err}")
+            print(f"🚨 [RVC IMPORT FAILURE] rvc_python still cannot be loaded after pip install: {cmd_err}")
             traceback.print_exc()
             print("!" * 80 + "\n")
-            raise RuntimeError(f"RVC dependencies failed to initialize: {cmd_err}")
+            raise RuntimeError(f"RVC dependencies failed to initialize even after install: {cmd_err}")
 
-        raise RuntimeError("RVC dependencies could not be loaded in current environment.")
 
 
 class CharacterVoiceConverter:
