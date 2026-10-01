@@ -797,12 +797,18 @@ def ensure_rvc_dependencies() -> bool:
             print(f"💡 [RVC PROBE] Initial rvc_python import probe notice: {import_err}")
 
         # Attempt 2: Auto-install with --no-deps for Hugging Face Spaces / Linux
-        print("⚡ [RVC SETUP] Installing RVC runtime modules with --no-deps (bypassing omegaconf conflict)...")
+        print("⚡ [RVC SETUP] Installing RVC runtime modules (antlr4, omegaconf, hydra-core)...")
         try:
             subprocess.run(
-                [sys.executable, "-m", "pip", "install", "-q", "antlr4-python3-runtime==4.9.3", "omegaconf"],
+                [sys.executable, "-m", "pip", "install", "-q", "antlr4-python3-runtime==4.9.3", "omegaconf", "hydra-core"],
                 check=False,
             )
+            _patch_tensorboard_for_fairseq()
+            from rvc_python.infer import RVCInference as _RVCClass  # type: ignore
+            RVCInference = _RVCClass
+            RVC_AVAILABLE = True
+            print("✅ [RVC SETUP] 'rvc-python' loaded successfully after runtime prerequisites!")
+            return True
         except Exception:
             pass
 

@@ -8,6 +8,8 @@ scipy
 setuptools
 antlr4-python3-runtime==4.9.3
 omegaconf
+hydra-core
+
 
 # Kokoro-82M Local Neural TTS (100% Local, Offline, No API Keys)
 kokoro
